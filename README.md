@@ -110,6 +110,7 @@ npm run dev
 
 
 ## References
+- [motion_viewer](https://github.com/Renkunzhao/motion_viewer)
 - [robot_viewer](https://github.com/fan-ziqi/robot_viewer.git)
 - [urdf-loaders](https://github.com/gkjohnson/urdf-loaders.git)
 - [BVHView](https://github.com/orangeduck/BVHView.git)
