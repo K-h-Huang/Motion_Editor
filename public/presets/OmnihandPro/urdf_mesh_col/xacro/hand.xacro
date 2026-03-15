@@ -1,0 +1,95 @@
+<?xml version="1.0"?>
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+
+    <xacro:include filename="$(find omnihand_pro_description)/urdf_mesh_col/xacro/const.xacro" />
+    <xacro:include filename="$(find omnihand_pro_description)/urdf_mesh_col/xacro/material.xacro" />
+    <xacro:include filename="$(find omnihand_pro_description)/urdf_mesh_col/xacro/thumb.xacro" />
+    <xacro:include filename="$(find omnihand_pro_description)/urdf_mesh_col/xacro/index.xacro" />
+    <xacro:include filename="$(find omnihand_pro_description)/urdf_mesh_col/xacro/middle.xacro" />
+    <xacro:include filename="$(find omnihand_pro_description)/urdf_mesh_col/xacro/ring_pinky.xacro" />
+    <xacro:property name="mesh_path" value="package://omnihand_pro_description/meshes" />
+
+
+    <xacro:macro name="hand" params="name mirror mirror_mesh *origin">
+
+        <joint name="${name}_palm_joint" type="fixed">
+            <xacro:insert_block name="origin" />
+            <parent link="base_link" />
+            <child link="${name}_palm" />
+        </joint>
+
+        <link name="${name}_palm">
+            <visual>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+
+                <geometry>
+                    <xacro:if value="${mirror_mesh == True}">
+                        <mesh filename="${mesh_path}/l_palm.STL" />
+                    </xacro:if>
+                    <xacro:if value="${mirror_mesh == False}">
+                        <mesh filename="${mesh_path}/r_palm.STL" />
+                    </xacro:if>
+                </geometry>
+                <material name="black" />
+            </visual>
+            <inertial>
+                <origin rpy="0 0 0"
+                    xyz="${palm_com_x} ${palm_com_y*mirror} ${palm_com_z}" />
+                <mass value="${palm_mass}" />
+                <inertia
+                    ixx="${palm_ixx}" ixy="${palm_ixy*mirror}"
+                    ixz="${palm_ixz}"
+                    iyy="${palm_iyy}" iyz="${palm_iyz*mirror}"
+                    izz="${palm_izz}" />
+            </inertial>
+            <collision>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <xacro:if value="${mirror_mesh == True}">
+                        <mesh filename="${mesh_path}/collision/l_palm_col.STL" />
+                    </xacro:if>
+                    <xacro:if value="${mirror_mesh == False}">
+                        <mesh filename="${mesh_path}/collision/r_palm_col.STL" />
+                    </xacro:if>
+                </geometry>
+            </collision>
+        </link>
+
+        <xacro:thumb name="${name}" mirror="${mirror}" mirror_mesh="${mirror_mesh}">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+        </xacro:thumb>
+
+        <xacro:index name="${name}" mirror="${mirror}" mirror_mesh="${mirror_mesh}">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+        </xacro:index>
+
+        <xacro:middle name="${name}" mirror="${mirror}" mirror_mesh="${mirror_mesh}">
+            <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+        </xacro:middle>
+
+        <joint name="${name}_ring_mcp_joint" type="revolute">
+            <origin xyz="${ring_mcp_x} ${ring_mcp_y*mirror} ${ring_mcp_z}" rpy="0.0 0.0 0.0" />
+            <parent link="${name}_palm" />
+            <child link="${name}_ring_mcp_link" />
+            <axis xyz="0 1 0" />
+            <limit effort="${ring_mcp_torque_max}" velocity="${ring_mcp_velocity_max}"
+                lower="${ring_mcp_position_min}" upper="${ring_mcp_position_max}" />
+        </joint>
+        <xacro:ring name="${name}_ring" mirror="${mirror}" mirror_mesh="${mirror_mesh}">
+        </xacro:ring>
+
+        <joint name="${name}_pinky_mcp_joint" type="revolute">
+            <origin xyz="${pinky_mcp_x} ${pinky_mcp_y*mirror} ${pinky_mcp_z}" rpy="0.0 0.0 0.0" />
+            <parent link="${name}_palm" />
+            <child link="${name}_pinky_mcp_link" />
+            <axis xyz="0 1 0" />
+            <limit effort="${ring_mcp_torque_max}" velocity="${ring_mcp_velocity_max}"
+                lower="${ring_mcp_position_min}" upper="${ring_mcp_position_max}" />
+        </joint>
+        <xacro:ring name="${name}_pinky" mirror="${mirror}" mirror_mesh="${mirror_mesh}">
+        </xacro:ring>
+
+    </xacro:macro>
+</robot>

@@ -1,0 +1,412 @@
+{
+  "capturedObjects": [
+    "presets/omomo/captured_objects/largetable_cleaned_simplified.obj"
+  ],
+  "presets": [
+    {
+      "id": "lafan1-bvh-dance1",
+      "label": "LAFAN1 BVH dance1_subject1",
+      "description": "Pure BVH preview mode without URDF.",
+      "motion": {
+        "kind": "bvh",
+        "path": "presets/LAFAN1/bvh/dance1_subject1.bvh"
+      }
+    },
+    {
+      "id": "g1-csv-dance1",
+      "label": "Unitree G1 + CSV dance1_subject1",
+      "description": "G1 URDF with LAFAN1 retargeted CSV motion.",
+      "model": {
+        "urdfPath": "presets/LAFAN1_Retargeting_Dataset/robot_description/g1/g1_29dof_rev_1_0.urdf"
+      },
+      "motion": {
+        "kind": "csv",
+        "path": "presets/LAFAN1_Retargeting_Dataset/g1/dance1_subject1.csv"
+      }
+    },
+    {
+      "id": "h1-csv-dance1",
+      "label": "Unitree H1 + CSV dance1_subject1",
+      "description": "H1 URDF with LAFAN1 retargeted CSV motion.",
+      "model": {
+        "urdfPath": "presets/LAFAN1_Retargeting_Dataset/robot_description/h1/h1.urdf"
+      },
+      "motion": {
+        "kind": "csv",
+        "path": "presets/LAFAN1_Retargeting_Dataset/h1/dance1_subject1.csv"
+      }
+    },
+    {
+      "id": "h1-2-csv-dance1",
+      "label": "Unitree H1-2 + CSV dance1_subject1",
+      "description": "H1-2 URDF with LAFAN1 retargeted CSV motion.",
+      "model": {
+        "urdfPath": "presets/LAFAN1_Retargeting_Dataset/robot_description/h1_2/h1_2_wo_hand.urdf"
+      },
+      "motion": {
+        "kind": "csv",
+        "path": "presets/LAFAN1_Retargeting_Dataset/h1_2/dance1_subject1.csv"
+      }
+    },
+    {
+      "id": "go2-model",
+      "label": "Unitree Go2",
+      "description": "Go2 URDF preset model for MimicKit playback.",
+      "model": {
+        "files": [
+          {
+            "path": "presets/unitree/go2_description/urdf/go2_description.urdf",
+            "mapAs": "go2_description/urdf/go2_description.urdf"
+          },
+          {
+            "path": "presets/unitree/go2_description/dae/base.dae",
+            "mapAs": "go2_description/dae/base.dae"
+          },
+          {
+            "path": "presets/unitree/go2_description/dae/hip.dae",
+            "mapAs": "go2_description/dae/hip.dae"
+          },
+          {
+            "path": "presets/unitree/go2_description/dae/thigh.dae",
+            "mapAs": "go2_description/dae/thigh.dae"
+          },
+          {
+            "path": "presets/unitree/go2_description/dae/thigh_mirror.dae",
+            "mapAs": "go2_description/dae/thigh_mirror.dae"
+          },
+          {
+            "path": "presets/unitree/go2_description/dae/calf.dae",
+            "mapAs": "go2_description/dae/calf.dae"
+          },
+          {
+            "path": "presets/unitree/go2_description/dae/calf_mirror.dae",
+            "mapAs": "go2_description/dae/calf_mirror.dae"
+          },
+          {
+            "path": "presets/unitree/go2_description/dae/foot.dae",
+            "mapAs": "go2_description/dae/foot.dae"
+          }
+        ],
+        "selectedUrdfPath": "go2_description/urdf/go2_description.urdf"
+      }
+    },
+    {
+      "id": "omnihand-pro-left",
+      "label": "Omnihand Pro Left",
+      "description": "Omnihand Pro left hand URDF preset model.",
+      "model": {
+        "files": [
+          {
+            "path": "presets/OmnihandPro/urdf/omnihand_pro_left.urdf",
+            "mapAs": "OmnihandPro/urdf/omnihand_pro_left.urdf"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/l_palm.STL",
+            "mapAs": "OmnihandPro/meshes/l_palm.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/l_thumb_abad.STL",
+            "mapAs": "OmnihandPro/meshes/l_thumb_abad.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/l_thumb_roll.STL",
+            "mapAs": "OmnihandPro/meshes/l_thumb_roll.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/index_abad.STL",
+            "mapAs": "OmnihandPro/meshes/index_abad.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/index_mcp.STL",
+            "mapAs": "OmnihandPro/meshes/index_mcp.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/index_pip.STL",
+            "mapAs": "OmnihandPro/meshes/index_pip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/middle_abad.STL",
+            "mapAs": "OmnihandPro/meshes/middle_abad.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/middle_mcp.STL",
+            "mapAs": "OmnihandPro/meshes/middle_mcp.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/middle_pip.STL",
+            "mapAs": "OmnihandPro/meshes/middle_pip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/ring_mcp.STL",
+            "mapAs": "OmnihandPro/meshes/ring_mcp.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/ring_pip.STL",
+            "mapAs": "OmnihandPro/meshes/ring_pip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/thumb_mcp.STL",
+            "mapAs": "OmnihandPro/meshes/thumb_mcp.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/thumb_pip.STL",
+            "mapAs": "OmnihandPro/meshes/thumb_pip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/thumb_dip.STL",
+            "mapAs": "OmnihandPro/meshes/thumb_dip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/finger_dip.STL",
+            "mapAs": "OmnihandPro/meshes/finger_dip.STL"
+          }
+        ],
+        "selectedUrdfPath": "OmnihandPro/urdf/omnihand_pro_left.urdf"
+      }
+    },
+    {
+      "id": "omnihand-pro-right",
+      "label": "Omnihand Pro Right",
+      "description": "Omnihand Pro right hand URDF preset model.",
+      "model": {
+        "files": [
+          {
+            "path": "presets/OmnihandPro/urdf/omnihand_pro_right.urdf",
+            "mapAs": "OmnihandPro/urdf/omnihand_pro_right.urdf"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/r_palm.STL",
+            "mapAs": "OmnihandPro/meshes/r_palm.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/r_thumb_abad.STL",
+            "mapAs": "OmnihandPro/meshes/r_thumb_abad.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/r_thumb_roll.STL",
+            "mapAs": "OmnihandPro/meshes/r_thumb_roll.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/index_abad.STL",
+            "mapAs": "OmnihandPro/meshes/index_abad.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/index_mcp.STL",
+            "mapAs": "OmnihandPro/meshes/index_mcp.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/index_pip.STL",
+            "mapAs": "OmnihandPro/meshes/index_pip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/middle_abad.STL",
+            "mapAs": "OmnihandPro/meshes/middle_abad.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/middle_mcp.STL",
+            "mapAs": "OmnihandPro/meshes/middle_mcp.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/middle_pip.STL",
+            "mapAs": "OmnihandPro/meshes/middle_pip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/ring_mcp.STL",
+            "mapAs": "OmnihandPro/meshes/ring_mcp.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/ring_pip.STL",
+            "mapAs": "OmnihandPro/meshes/ring_pip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/thumb_mcp.STL",
+            "mapAs": "OmnihandPro/meshes/thumb_mcp.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/thumb_pip.STL",
+            "mapAs": "OmnihandPro/meshes/thumb_pip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/thumb_dip.STL",
+            "mapAs": "OmnihandPro/meshes/thumb_dip.STL"
+          },
+          {
+            "path": "presets/OmnihandPro/meshes/finger_dip.STL",
+            "mapAs": "OmnihandPro/meshes/finger_dip.STL"
+          }
+        ],
+        "selectedUrdfPath": "OmnihandPro/urdf/omnihand_pro_right.urdf"
+      }
+    },
+    {
+      "id": "g1-mimickit-cartwheel",
+      "label": "MimicKit G1 cartwheel",
+      "description": "MimicKit G1 cartwheel preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/g1/g1_cartwheel.pkl"
+      }
+    },
+    {
+      "id": "g1-mimickit-double-kong",
+      "label": "MimicKit G1 double kong",
+      "description": "MimicKit G1 double kong preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/g1/g1_double_kong.pkl"
+      }
+    },
+    {
+      "id": "g1-mimickit-kick-combo",
+      "label": "MimicKit G1 kick combo",
+      "description": "MimicKit G1 kick combo preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/g1/g1_kick_combo.pkl"
+      }
+    },
+    {
+      "id": "g1-mimickit-run",
+      "label": "MimicKit G1 run",
+      "description": "MimicKit G1 run preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/g1/g1_run.pkl"
+      }
+    },
+    {
+      "id": "g1-mimickit-speed-vault",
+      "label": "MimicKit G1 speed vault",
+      "description": "MimicKit G1 speed vault preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/g1/g1_speed_vault.pkl"
+      }
+    },
+    {
+      "id": "g1-mimickit-spinkick",
+      "label": "MimicKit G1 spinkick",
+      "description": "MimicKit G1 spinkick preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/g1/g1_spinkick.pkl"
+      }
+    },
+    {
+      "id": "g1-mimickit-walk",
+      "label": "MimicKit G1 walk",
+      "description": "MimicKit G1 walk preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/g1/g1_walk.pkl"
+      }
+    },
+    {
+      "id": "go2-mimickit-pace",
+      "label": "MimicKit Go2 pace",
+      "description": "MimicKit Go2 pace preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/go2/go2_pace.pkl"
+      }
+    },
+    {
+      "id": "go2-mimickit-run",
+      "label": "MimicKit Go2 run",
+      "description": "MimicKit Go2 run preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/go2/go2_run.pkl"
+      }
+    },
+    {
+      "id": "go2-mimickit-trot",
+      "label": "MimicKit Go2 trot",
+      "description": "MimicKit Go2 trot preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/go2/go2_trot.pkl"
+      }
+    },
+    {
+      "id": "go2-mimickit-walk0",
+      "label": "MimicKit Go2 walk0",
+      "description": "MimicKit Go2 walk0 preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/go2/go2_walk0.pkl"
+      }
+    },
+    {
+      "id": "go2-mimickit-walk1",
+      "label": "MimicKit Go2 walk1",
+      "description": "MimicKit Go2 walk1 preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/go2/go2_walk1.pkl"
+      }
+    },
+    {
+      "id": "go2-mimickit-walk2",
+      "label": "MimicKit Go2 walk2",
+      "description": "MimicKit Go2 walk2 preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/go2/go2_walk2.pkl"
+      }
+    },
+    {
+      "id": "go2-mimickit-walk3",
+      "label": "MimicKit Go2 walk3",
+      "description": "MimicKit Go2 walk3 preset motion.",
+      "motion": {
+        "kind": "mimickit",
+        "path": "presets/MimicKit/go2/go2_walk3.pkl"
+      }
+    },
+    {
+      "id": "smplx-amass-extended3",
+      "label": "SMPL-X Male + ACCAD Male2MartialArtsExtended_c3d",
+      "description": "SMPL-X male model with AMASS Extended_3_stageii motion preview.",
+      "model": {
+        "files": [
+          {
+            "path": "presets/SMPL-X/SMPLX_MALE.npz",
+            "mapAs": "presets/smplx/SMPLX_MALE.npz"
+          }
+        ]
+      },
+      "motion": {
+        "kind": "smpl",
+        "files": [
+          {
+            "path": "presets/AMASS/ACCAD/SMPL-X G/Male2MartialArtsExtended_c3d/Extended_3_stageii.npz",
+            "mapAs": "presets/amass/Extended_3_stageii.npz"
+          }
+        ]
+      }
+    },
+    {
+      "id": "smplx-omomo-sub2-largetable-003",
+      "label": "SMPL-X Male + OMOMO sub2_largetable_003",
+      "description": "SMPL-X model with OMOMO resolved motion preview.",
+      "model": {
+        "files": [
+          {
+            "path": "presets/SMPL-X/SMPLX_MALE.npz",
+            "mapAs": "presets/smplx/SMPLX_MALE.npz"
+          }
+        ]
+      },
+      "motion": {
+        "kind": "smpl",
+        "files": [
+          {
+            "path": "presets/omomo/motions/sub2_largetable_003.npz",
+            "mapAs": "presets/omomo/motions/sub2_largetable_003.npz"
+          }
+        ]
+      }
+    }
+  ]
+}

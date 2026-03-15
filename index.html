@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <title>Motion Editor</title>
+  </head>
+  <body>
+    <div id="app" data-viewer-state="idle">
+      <canvas id="viewer-canvas" aria-label="3D robot viewer"></canvas>
+
+      <div id="drop-overlay" class="drop-overlay">
+        <div class="drop-overlay__panel">
+          <button
+            id="drop-overlay-dock-btn"
+            type="button"
+            class="drop-overlay__dock-btn"
+            aria-label="Move panel to bottom left"
+            title="Move panel to bottom left"
+          >
+            −
+          </button>
+          <p class="drop-overlay__eyebrow">Motion Editor</p>
+          <h1>Motion Editor</h1>
+          <p id="drop-hint" class="drop-overlay__hint">
+            Drag files/folders, or click Select Folder / Select File.
+          </p>
+          <div class="drop-overlay__actions">
+            <button id="pick-folder-btn" type="button">Select Folder</button>
+            <button id="pick-files-btn" type="button">Select File</button>
+            <button id="reset-btn" type="button" class="ghost">Reset</button>
+          </div>
+        </div>
+      </div>
+
+      <aside id="dataset-panel" class="dataset-panel" aria-label="Datasets and models">
+        <div class="panel-header">
+          <p class="dataset-panel__title">Datasets</p>
+          <button id="dataset-panel-minimize" class="panel-minimize-btn" title="Minimize">_</button>
+        </div>
+        <div class="panel-content">
+        <div class="preset-picker">
+          <label for="urdf-select" class="preset-picker__label">Models</label>
+          <div class="preset-picker__row preset-picker__row--single">
+            <select id="urdf-select" class="preset-picker__select">
+              <option value="">Loading models...</option>
+            </select>
+          </div>
+          <label for="preset-select" class="preset-picker__label">Motions</label>
+          <div class="preset-picker__row preset-picker__row--single">
+            <select id="preset-select" class="preset-picker__select">
+              <option value="">Select model first</option>
+            </select>
+          </div>
+          <label for="obj-select" class="preset-picker__label">Objects</label>
+          <div class="preset-picker__row preset-picker__row--single">
+            <select id="obj-select" class="preset-picker__select">
+              <option value="">Select model first</option>
+            </select>
+          </div>
+          <button id="preset-load-btn" type="button" class="ghost" hidden>Load Preset</button>
+          <select
+            id="smpl-model-select"
+            class="preset-picker__select"
+            hidden
+            aria-hidden="true"
+            tabindex="-1"
+          >
+            <option value="">No SMPL model loaded</option>
+          </select>
+          <p class="preset-picker__notice">
+            Preset previews bundle demo assets under their upstream licenses. Check the original source and included license
+            files before reuse. If you have any issues, please communicate through GitHub issues.
+          </p>
+        </div>
+        </div>
+      </aside>
+
+      <aside id="status-panel" class="status-panel" aria-live="polite">
+        <div class="panel-header">
+          <div class="status-panel__top">
+            <span id="state-chip" class="state-chip">Idle</span>
+            <strong id="status-title">Waiting For Input</strong>
+          </div>
+          <button id="status-panel-minimize" class="panel-minimize-btn" title="Minimize">_</button>
+        </div>
+        <div class="panel-content">
+        <section class="shortcuts-panel" aria-label="Keyboard shortcuts">
+          <p class="shortcuts-panel__title">Shortcuts</p>
+          <ul class="shortcuts-panel__list">
+            <li>
+              <kbd>Tab</kbd>
+              <span>Switch view mode (Free / Root Lock)</span>
+            </li>
+            <li>
+              <kbd>Space</kbd>
+              <span>Play / Pause motion</span>
+            </li>
+            <li>
+              <kbd>R</kbd>
+              <span>Reset motion to frame 1</span>
+            </li>
+            <li>
+              <kbd>Shift</kbd>
+              <span>Toggle SMPL Mesh / Skeleton</span>
+            </li>
+          </ul>
+        </section>
+        <section id="model-panel" class="model-panel">
+          <div class="model-panel__top">
+            <p id="model-title" class="model-panel__title">Model</p>
+          </div>
+          <div id="urdf-visual-controls" class="model-panel__controls" hidden>
+            <button id="show-visual-btn" type="button" class="toggle-chip active">
+              Visual
+            </button>
+            <button id="show-collision-btn" type="button" class="toggle-chip">
+              Collision
+            </button>
+          </div>
+          <p id="status-detail" class="status-panel__detail">
+            Drag and drop to load URDF / CSV / MimicKit PKL / GMR PKL / BVH / SMPL model (.npz/.pkl) + motion (.npz).
+            <br>
+            Export supports: CSV, GMR PKL, and MimicKit PKL formats.
+          </p>
+          <ul id="status-warnings" class="status-panel__warnings"></ul>
+        </section>
+        <section id="motion-controls-section" class="motion-controls" hidden>
+          <div class="motion-controls__top">
+            <p id="motion-title" class="motion-controls__title">Motion</p>
+            <span id="motion-frame-label" class="motion-controls__frame">Frame 0 / 0</span>
+          </div>
+          <div class="motion-controls__actions">
+            <button id="view-mode-btn" type="button" class="toggle-chip active">
+              View: Root Lock
+            </button>
+            <button id="motion-play-btn" type="button" class="toggle-chip">Play</button>
+            <button id="motion-reset-btn" type="button" class="toggle-chip">Reset</button>
+            <button id="insert-keyframe-btn" type="button" class="toggle-chip">Insert Keyframe</button>
+            <button id="export-motion-btn" type="button" class="toggle-chip">Export</button>
+          </div>
+          <p class="motion-controls__export-info">Export supports: CSV, GMR PKL, and MimicKit PKL formats.</p>
+          <div id="motion-fps-control" class="motion-controls__fps" style="display: flex; gap: 1rem; margin-bottom: 0.5rem;">
+            <div style="flex: 1;">
+              <label for="motion-fps-input">FPS</label>
+              <input
+                id="motion-fps-input"
+                class="motion-controls__fps-input"
+                type="number"
+                min="0.1"
+                step="0.1"
+                value="30"
+                inputmode="decimal"
+                style="width: 100%;"
+              />
+            </div>
+            <div style="flex: 1;">
+              <label for="motion-frame-count-input">Total Frames</label>
+              <input
+                id="motion-frame-count-input"
+                class="motion-controls__fps-input"
+                type="number"
+                min="2"
+                step="1"
+                value="100"
+                inputmode="numeric"
+                style="width: 100%;"
+              />
+            </div>
+          </div>
+          <div id="keyframe-markers" style="position: relative; width: 100%; height: 20px; margin-bottom: 0.25rem;"></div>
+          <input
+            id="motion-frame-slider"
+            class="motion-controls__slider"
+            type="range"
+            min="0"
+            max="0"
+            step="1"
+            value="0"
+          />
+          <ul id="motion-warnings" class="status-panel__warnings motion-controls__warnings"></ul>
+        </section>
+        <section id="mode-props-panel" class="mode-props-panel" hidden>
+          <p class="mode-props-panel__title">Mode Properties</p>
+          <div id="mode-props-list" class="mode-props-panel__chips"></div>
+        </section>
+        </div>
+      </aside>
+      <aside id="joint-panel" class="joint-panel" hidden>
+        <div class="joint-panel__header">
+          <p class="joint-panel__title">Joint Control</p>
+          <button id="joint-panel-toggle" class="joint-panel__toggle">−</button>
+        </div>
+        <div id="joint-panel-content" class="joint-panel__content">
+          <div id="joint-list" class="joint-list"></div>
+        </div>
+      </aside>
+    </div>
+
+    <input id="folder-input" type="file" webkitdirectory directory multiple hidden />
+    <input
+      id="file-input"
+      type="file"
+      multiple
+      hidden
+      accept=".urdf,.csv,.bvh,.npz,.pkl,.stl,.obj,.dae,.xml,.png,.jpg,.jpeg,.bmp,.gif,.tga,.webp"
+    />
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

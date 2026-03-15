@@ -1,0 +1,129 @@
+<?xml version="1.0"?>
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:macro name="ring" params="name mirror mirror_mesh">
+        <!-- ring  -->
+
+        <link name="${name}_mcp_link">
+            <visual>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/ring_mcp.STL" />
+                </geometry>
+                <material name="black" />
+            </visual>
+            <inertial>
+                <origin rpy="0 0 0"
+                    xyz="${ring_mcp_com_x} ${ring_mcp_com_y*mirror} ${ring_mcp_com_z}" />
+                <mass value="${ring_mcp_mass}" />
+                <inertia
+                    ixx="${ring_mcp_ixx}" ixy="${ring_mcp_ixy*mirror}"
+                    ixz="${ring_mcp_ixz}"
+                    iyy="${ring_mcp_iyy}" iyz="${ring_mcp_iyz*mirror}"
+                    izz="${ring_mcp_izz}" />
+            </inertial>
+            <collision>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/collision/ring_mcp_col.STL" />
+                </geometry>
+
+            </collision>
+        </link>
+
+        <link name="${name}_pip_link">
+            <visual>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/ring_pip.STL" />
+                </geometry>
+                <material name="black" />
+            </visual>
+            <inertial>
+                <origin rpy="0 0 0"
+                    xyz="${ring_pip_com_x} ${ring_pip_com_y*mirror} ${ring_pip_com_z}" />
+                <mass value="${ring_mcp_mass}" />
+                <inertia
+                    ixx="${ring_pip_ixx}" ixy="${ring_pip_ixy*mirror}"
+                    ixz="${ring_pip_ixz}"
+                    iyy="${ring_pip_iyy}" iyz="${ring_pip_iyz*mirror}"
+                    izz="${ring_pip_izz}" />
+            </inertial>
+            <collision>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/collision/ring_pip_col.STL" />
+                </geometry>
+
+            </collision>
+        </link>
+
+        <joint name="${name}_pip_joint" type="revolute">
+            <origin xyz="${ring_pip_x} ${ring_pip_y} ${ring_pip_z}" rpy="0 0 0" />
+            <parent link="${name}_mcp_link" />
+            <child link="${name}_pip_link" />
+            <axis xyz="0 1 0" />
+            <limit effort="${ring_pip_torque_max}" velocity="${ring_pip_velocity_max}"
+                lower="${ring_pip_position_min}" upper="${ring_pip_position_max}" />
+            <mimic
+                joint="${name}_mcp_joint"
+                multiplier="${ring_pip_multiplier}"
+                offset="0" />
+        </joint>
+
+        <link name="${name}_dip_link">
+            <visual>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/finger_dip.STL" />
+                </geometry>
+                <material name="black" />
+            </visual>
+            <inertial>
+                <origin rpy="0 0 0"
+                    xyz="${ring_dip_com_x} ${ring_dip_com_y*mirror} ${ring_dip_com_z}" />
+                <mass value="${ring_dip_mass}" />
+                <inertia
+                    ixx="${ring_dip_ixx}" ixy="${ring_dip_ixy*mirror}"
+                    ixz="${ring_dip_ixz}"
+                    iyy="${ring_dip_iyy}" iyz="${ring_dip_iyz*mirror}"
+                    izz="${ring_dip_izz}" />
+            </inertial>
+            <collision>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/collision/finger_dip_col.STL" />
+                </geometry>
+            </collision>
+        </link>
+
+        <joint name="${name}_dip_joint" type="revolute">
+            <origin xyz=" ${ring_dip_x}  ${ring_dip_y} ${ring_dip_z}" rpy="0 0 0" />
+            <parent link="${name}_pip_link" />
+            <child link="${name}_dip_link" />
+            <axis xyz="0 1 0" />
+            <limit effort="${ring_dip_torque_max}" velocity="${ring_dip_velocity_max}"
+                lower="${ring_dip_position_min}" upper="${ring_dip_position_max}" />
+            <mimic
+                joint="${name}_mcp_joint"
+                multiplier="${ring_dip_multiplier}"
+                offset="0" />
+        </joint>
+
+        <link name="${name}_tip">
+            <collision>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <sphere radius="0.001" />
+                </geometry>
+            </collision>
+        </link>
+
+        <joint name="${name}_tip_joint" type="fixed">
+            <origin xyz="${ring_tip_x} 0 ${ring_tip_z}" rpy="0 0 0" />
+            <parent link="${name}_dip_link" />
+            <child link="${name}_tip" />
+        </joint>
+    </xacro:macro>
+</robot>
