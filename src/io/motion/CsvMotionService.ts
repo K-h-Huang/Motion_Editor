@@ -242,22 +242,22 @@ export class CsvMotionService {
     };
   }
 
-  toCsv(clip: any): string {
-    console.log('CsvMotionService.toCsv called with clip:', clip);
+  toCsv(clip: any, robotHeight: number = 0): string {
+    console.log('CsvMotionService.toCsv called with clip:', clip, 'robotHeight:', robotHeight);
     const lines: string[] = [];
-    
-    const header = ['root_x', 'root_y', 'root_z', 'root_qx', 'root_qy', 'root_qz', 'root_qw'];
-    for (const jointName of clip.schema.jointNames) {
-      header.push(jointName);
-    }
-    lines.push(header.join(','));
-    console.log('Header row created');
 
     for (let frameIndex = 0; frameIndex < clip.frameCount; frameIndex++) {
       const base = frameIndex * clip.stride;
       const row: string[] = [];
       for (let i = 0; i < clip.stride; i++) {
-        row.push(clip.data[base + i].toString());
+        let value = clip.data[base + i];
+        // 调整root z轴值（假设z轴是第3个分量，索引为2）
+        if (i === 2) { // root_z
+          const originalValue = value;
+          value += robotHeight;
+          console.log(`Frame ${frameIndex}: root_z original=${originalValue}, height=${robotHeight}, adjusted=${value}`);
+        }
+        row.push(String(parseFloat(value)));
       }
       lines.push(row.join(','));
     }

@@ -4456,6 +4456,67 @@ export class AppController {
     this.exportMotionClip(clip);
   };
 
+  private getRobotHeight(): number {
+    console.log('getRobotHeight called');
+    if (!this.lastLoadResult?.robot) {
+      console.log('No robot found in lastLoadResult');
+      return 0;
+    }
+
+    try {
+      // 计算机器人边界框
+      const robot = this.lastLoadResult.robot;
+      console.log('Robot found:', robot);
+      
+      const box = this.sceneController['computeRobotBounds'](robot);
+      if (!box) {
+        console.log('No bounding box found');
+        return 0;
+      }
+
+      console.log('Bounding box min:', box.min);
+      console.log('Bounding box max:', box.max);
+      
+      // 获取地面位置（机器人最低点）
+      const groundPosition = box.min.y;
+      console.log('Ground position (box.min.y):', groundPosition);
+      
+      // 计算root关节的位置
+      // 首先尝试从robot对象中获取root关节
+      const robotAny = robot as any;
+      let rootYPosition = 0;
+      
+      // 尝试不同的方式获取root关节位置
+      if (robotAny.joints && robotAny.joints['floating_base_joint']) {
+        const rootJoint = robotAny.joints['floating_base_joint'];
+        if (rootJoint.position) {
+          rootYPosition = rootJoint.position.y;
+          console.log('Root joint position from joints.floating_base_joint:', rootYPosition);
+        }
+      } else if (robotAny.position) {
+        rootYPosition = robotAny.position.y;
+        console.log('Root joint position from robot.position:', rootYPosition);
+      } else {
+        // 如果无法获取root位置，使用边界框中心
+        // 创建一个临时对象来存储中心位置
+        const center = { y: 0 };
+        // 模拟getCenter方法的行为
+        center.y = (box.min.y + box.max.y) / 2;
+        rootYPosition = center.y;
+        console.log('Root joint position from bounding box center:', rootYPosition);
+      }
+      
+      // 计算root关节到地面的高度
+      const rootHeight = rootYPosition - groundPosition;
+      console.log('Calculated root height:', rootHeight);
+      
+      return rootHeight;
+    } catch (error) {
+      console.error('Error calculating robot height:', error);
+      return 0;
+    }
+  }
+
   private exportMotionClip(clip: any): void {
     let content: string;
     let fileName: string;
@@ -4463,7 +4524,8 @@ export class AppController {
 
     if (this.currentMotionKind === 'csv') {
       console.log('Generating CSV content');
-      const csvContent = this.csvMotionService.toCsv(clip);
+      const robotHeight = this.getRobotHeight();
+      const csvContent = this.csvMotionService.toCsv(clip, robotHeight);
       console.log('CSV content generated, length:', csvContent.length);
       content = csvContent;
       fileName = 'modified_motion.csv';
