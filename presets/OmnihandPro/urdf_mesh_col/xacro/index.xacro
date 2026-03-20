@@ -1,0 +1,172 @@
+<?xml version="1.0"?>
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:macro name="index" params="name mirror mirror_mesh *origin">
+        <!-- index  -->
+        <link name="${name}_index_abad_link">
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/index_abad.STL" />
+                </geometry>
+                <material name="black" />
+            </visual>
+            <inertial>
+                <origin rpy="0 0 0"
+                    xyz="${index_abad_com_x} ${index_abad_com_y*mirror} ${index_abad_com_z}" />
+                <mass value="${index_abad_mass}" />
+                <inertia
+                    ixx="${index_abad_ixx}" ixy="${index_abad_ixy*mirror}"
+                    ixz="${index_abad_ixz}"
+                    iyy="${index_abad_iyy}" iyz="${index_abad_iyz*mirror}"
+                    izz="${index_abad_izz}" />
+            </inertial>
+        </link>
+
+        <joint name="${name}_index_abad_joint" type="revolute">
+            <origin xyz="${index_abad_x} ${index_abad_y*mirror} ${index_abad_z}" rpy="0 0 0" />
+            <parent link="${name}_palm" />
+            <child link="${name}_index_abad_link" />
+            <axis xyz="1 0 0" />
+
+            <xacro:if value="${mirror_mesh == True}">
+                <limit effort="${index_abad_torque_max}" velocity="${index_abad_velocity_max}"
+                    lower="${index_abad_position_max*mirror}"
+                    upper="${index_abad_position_min*mirror}" />
+            </xacro:if>
+            <xacro:if value="${mirror_mesh == False}">
+                <limit effort="${index_abad_torque_max}" velocity="${index_abad_velocity_max}"
+                    lower="${index_abad_position_min}" upper="${index_abad_position_max}" />
+            </xacro:if>
+        </joint>
+
+        <link name="${name}_index_mcp_link">
+            <visual>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/index_mcp.STL" />
+                </geometry>
+                <material name="black" />
+            </visual>
+            <inertial>
+                <origin rpy="0 0 0"
+                    xyz="${index_mcp_com_x} ${index_mcp_com_y*mirror} ${index_mcp_com_z}" />
+                <mass value="${index_mcp_mass}" />
+                <inertia
+                    ixx="${index_mcp_ixx}" ixy="${index_mcp_ixy*mirror}"
+                    ixz="${index_mcp_ixz}"
+                    iyy="${index_mcp_iyy}" iyz="${index_mcp_iyz*mirror}"
+                    izz="${index_mcp_izz}" />
+            </inertial>
+            <collision>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/collision/index_mcp_col.STL" />
+                </geometry>
+                 
+            </collision>
+        </link>
+
+        <joint name="${name}_index_mcp_joint" type="revolute">
+            <origin xyz="${index_mcp_x} ${index_mcp_y} ${index_mcp_z}" rpy="0 0 0" />
+            <parent link="${name}_index_abad_link" />
+            <child link="${name}_index_mcp_link" />
+            <axis xyz="0 1 0" />
+            <limit effort="${index_mcp_torque_max}" velocity="${index_mcp_velocity_max}"
+                lower="${index_mcp_position_min}" upper="${index_mcp_position_max}" />
+        </joint>
+
+        <link name="${name}_index_pip_link">
+            <visual>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/index_pip.STL" />
+                </geometry>
+                <material name="black" />
+            </visual>
+            <inertial>
+                <origin rpy="0 0 0"
+                    xyz="${index_pip_com_x} ${index_pip_com_y*mirror} ${index_pip_com_z}" />
+                <mass value="${index_pip_mass}" />
+                <inertia
+                    ixx="${index_pip_ixx}" ixy="${index_pip_ixy*mirror}"
+                    ixz="${index_pip_ixz}"
+                    iyy="${index_pip_iyy}" iyz="${index_pip_iyz*mirror}"
+                    izz="${index_pip_izz}" />
+            </inertial>
+            <collision>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/collision/index_pip_col.STL" />
+                </geometry>
+                 
+            </collision>
+        </link>
+
+        <joint name="${name}_index_pip_joint" type="revolute">
+            <origin xyz="${index_pip_x} ${index_pip_y} ${index_pip_z}" rpy="0 0 0" />
+            <parent link="${name}_index_mcp_link" />
+            <child link="${name}_index_pip_link" />
+            <axis xyz="0 1 0" />
+            <limit effort="${index_pip_torque_max}" velocity="${index_pip_velocity_max}"
+                lower="${index_pip_position_min}" upper="${index_pip_position_max}" />
+        </joint>
+
+        <link name="${name}_index_dip_link">
+            <visual>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/finger_dip.STL" />
+                </geometry>
+                <material name="black" />
+            </visual>
+            <inertial>
+                <origin rpy="0 0 0"
+                    xyz="${index_dip_com_x} ${index_dip_com_y*mirror} ${index_dip_com_z}" />
+                <mass value="${index_dip_mass}" />
+                <inertia
+                    ixx="${index_dip_ixx}" ixy="${index_dip_ixy*mirror}"
+                    ixz="${index_dip_ixz}"
+                    iyy="${index_dip_iyy}" iyz="${index_dip_iyz*mirror}"
+                    izz="${index_dip_izz}" />
+            </inertial>
+            <collision>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <mesh filename="${mesh_path}/collision/finger_dip_col.STL" />
+                </geometry>
+                 
+            </collision>
+        </link>
+
+        <joint name="${name}_index_dip_joint" type="revolute">
+            <origin xyz=" ${index_dip_x}  ${index_dip_y} ${index_dip_z}" rpy="0 0 0" />
+            <parent link="${name}_index_pip_link" />
+            <child link="${name}_index_dip_link" />
+            <axis xyz="0 1 0" />
+            <limit effort="${index_dip_torque_max}" velocity="${index_dip_velocity_max}"
+                lower="${index_dip_position_min}" upper="${index_dip_position_max}" />
+            <mimic
+                joint="${name}_index_pip_joint"
+                multiplier="${index_dip_multiplier}"
+                offset="0" />
+        </joint>
+
+        <link name="${name}_index_tip">
+            <collision>
+                <origin rpy="0 0 0" xyz="0 0 0" />
+                <geometry>
+                    <sphere radius="0.001" />
+                </geometry>
+            </collision>
+        </link>
+
+        <joint name="${name}_index_tip_joint" type="fixed">
+            <origin xyz="${index_tip_x} 0 ${index_tip_z}" rpy="0 0 0" />
+            <parent link="${name}_index_dip_link" />
+            <child link="${name}_index_tip" />
+        </joint>
+
+    </xacro:macro>
+</robot>
