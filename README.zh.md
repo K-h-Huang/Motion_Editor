@@ -42,6 +42,23 @@
 8. 使用播放控件预览动作。
 9. 将动作导出为所需格式（CSV、GMR .pkl 或 MimicKit .pkl）。
 
+## 本地运行
+
+1. 安装 [npm](https://nodejs.org/en/download/)。
+2. 安装依赖、构建并启动开发服务器：
+```bash
+npm install
+npm run build
+npm run dev
+```
+3. 打开 Vite 输出的 URL。
+
+## 更新日志
+
+- 2026-3-20：优化界面，增加关键帧控制按钮，可通过关键帧按钮切换关键帧。
+
+
+## 数据集
 ### LAFAN1
 - 下载 [LAFAN1](https://github.com/ubisoft/ubisoft-laforge-animation-dataset/blob/master/lafan1/lafan1.zip) 或 [lafan1-resolved](https://github.com/orangeduck/lafan1-resolved#Download)。
 - 将 `.bvh` 文件直接拖入页面。
@@ -95,16 +112,7 @@ python3 tools/convert_omomo_seq_to_motion_npz.py \
 
 *这些动作仅用于网站功能演示。仓库不提供模型或动作资源下载，请从原始来源获取并遵循其许可证条款。如有问题，请通过 GitHub issues 进行交流。*
 
-## 本地运行
 
-1. 安装 [npm](https://nodejs.org/en/download/)。
-2. 安装依赖、构建并启动开发服务器：
-```bash
-npm install
-npm run build
-npm run dev
-```
-3. 打开 Vite 输出的 URL。
 
 ## 参考
 - [motion_viewer](https://github.com/Renkunzhao/motion_viewer.git)
