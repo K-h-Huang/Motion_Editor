@@ -1282,6 +1282,13 @@ export class AppController {
         this.renderCurrentReadyState();
       }
     };
+    
+    // 设置关节点击回调
+    this.sceneController.onJointClick = (jointName) => {
+      console.log('Joint clicked:', jointName);
+      // 滚动到对应的关节控制面板
+      this.scrollToJointControl(jointName);
+    };
 
     this.urdfLoadService = new UrdfLoadService();
     this.csvMotionService = new CsvMotionService();
@@ -4632,6 +4639,35 @@ export class AppController {
     } catch (error) {
       console.error('Error downloading file:', error);
       alert('下载文件时出错，请查看控制台了解详情。');
+    }
+  }
+
+  // 滚动到对应的关节控制面板
+  private scrollToJointControl(jointName: string): void {
+    // 查找包含该关节名称的关节项
+    const jointItems = this.jointList.querySelectorAll('.joint-item');
+    let targetItem: HTMLElement | null = null;
+
+    jointItems.forEach((item) => {
+      const jointNameElement = item.querySelector('.joint-name');
+      if (jointNameElement && jointNameElement.textContent === jointName) {
+        targetItem = item as HTMLElement;
+      }
+    });
+
+    if (targetItem) {
+      // 滚动到该关节项
+      targetItem.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+        inline: 'nearest'
+      });
+
+      // 添加视觉效果，例如闪烁
+      targetItem.style.backgroundColor = 'rgba(0, 255, 0, 0.2)';
+      setTimeout(() => {
+        targetItem!.style.backgroundColor = '';
+      }, 500);
     }
   }
 

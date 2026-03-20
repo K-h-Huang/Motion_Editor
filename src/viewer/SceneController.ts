@@ -142,6 +142,7 @@ export function evaluateScaleWarning(maxDimension: number): string | null {
 
 export class SceneController {
   public onViewWarning: ((warning: string | null) => void) | null = null;
+  public onJointClick?: (jointName: string) => void;
 
   private readonly scene: any;
   private readonly camera: any;
@@ -665,6 +666,8 @@ export class SceneController {
         this.clearJointHighlights();
         // 高亮点击的关节
         this.highlightJoint(jointName);
+        // 触发关节点击回调
+        this.onJointClick?.(jointName);
       }
     }
   }
