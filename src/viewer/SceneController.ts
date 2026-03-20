@@ -799,4 +799,124 @@ export class SceneController {
   private emitWarning(warning: string | null): void {
     this.onViewWarning?.(warning);
   }
+
+  // 高亮指定关节
+  highlightJoint(jointName: string): void {
+    if (!this.currentRobot) {
+      console.log('No robot found for highlighting');
+      return;
+    }
+
+    // 先清除所有关节的高亮
+    this.clearJointHighlights();
+
+    // 查找并高亮指定关节
+    const robotAny = this.currentRobot as any;
+    console.log('Looking for joint:', jointName);
+
+    if (robotAny.joints && robotAny.joints[jointName]) {
+      const joint = robotAny.joints[jointName];
+      console.log('Found joint:', joint);
+      
+      // 尝试多种方式查找关节对应的链接
+      let link = null;
+      
+      // 方式1: 直接访问link属性
+      if (joint.link) {
+        link = joint.link;
+        console.log('Found link via joint.link:', link);
+      }
+      // 方式2: 访问childLink属性
+      else if (joint.childLink) {
+        link = joint.childLink;
+        console.log('Found link via joint.childLink:', link);
+      }
+      // 方式3: 访问children属性
+      else if (joint.children && joint.children.length > 0) {
+        link = joint.children[0];
+        console.log('Found link via joint.children[0]:', link);
+      }
+      
+      if (link) {
+        let meshFound = false;
+        
+        // 只处理当前链接的直接子网格，不递归遍历所有子节点
+        // 这样可以避免高亮后续的关节链接
+        link.children.forEach((child: any) => {
+          if (child.isMesh) {
+            meshFound = true;
+            console.log('Found direct mesh:', child.name);
+            // 保存原始材质
+            if (!child.userData.originalMaterial) {
+              child.userData.originalMaterial = child.material;
+            }
+            // 创建高亮材质
+            child.material = new MeshPhongMaterial({
+              color: 0x00ff00,
+              emissive: 0x00ff00,
+              shininess: 100,
+              transparent: true,
+              opacity: 0.8,
+              envMap: this.scene.environment ?? null,
+              reflectivity: 0.5
+            });
+          }
+        });
+        
+        if (!meshFound) {
+          console.log('No direct meshes found in link');
+          
+          // 如果当前链接没有直接网格，尝试查找第一个包含网格的子节点
+          const findFirstMesh = (node: any): boolean => {
+            for (let i = 0; i < node.children.length; i++) {
+              const child = node.children[i];
+              if (child.isMesh) {
+                console.log('Found first mesh in link hierarchy:', child.name);
+                // 保存原始材质
+                if (!child.userData.originalMaterial) {
+                  child.userData.originalMaterial = child.material;
+                }
+                // 创建高亮材质
+                child.material = new MeshPhongMaterial({
+                  color: 0x00ff00,
+                  emissive: 0x00ff00,
+                  shininess: 100,
+                  transparent: true,
+                  opacity: 0.8,
+                  envMap: this.scene.environment ?? null,
+                  reflectivity: 0.5
+                });
+                return true;
+              }
+              // 只递归一层，避免高亮太多
+              if (findFirstMesh(child)) {
+                return true;
+              }
+            }
+            return false;
+          };
+          
+          findFirstMesh(link);
+        }
+      } else {
+        console.log('Joint has no link or childLink');
+      }
+    } else {
+      console.log('Joint not found:', jointName);
+    }
+  }
+
+  // 清除所有关节的高亮
+  clearJointHighlights(): void {
+    if (!this.currentRobot) {
+      return;
+    }
+
+    this.currentRobot.traverse((child: any) => {
+      if (child.isMesh && child.userData.originalMaterial) {
+        child.material = child.userData.originalMaterial;
+        delete child.userData.originalMaterial;
+      }
+    });
+  }
 }

@@ -42,7 +42,24 @@ Its core purpose is to quickly load robot models in the browser, create and edit
 8. Preview the motion using the playback controls.
 9. Export the motion to your desired format (CSV, GMR .pkl, or MimicKit .pkl).
 
+## Run locally
 
+1. Install [npm](https://nodejs.org/en/download/).
+2. Install dependencies, build and start dev server:
+```bash
+npm install
+npm run build
+npm run dev
+```
+3. Open the URL printed by Vite.
+
+## Update Log
+- 2026-3-20：
+1.Optimize the interface and add keyframe control buttons, allowing keyframes to be switched using the keyframe button.
+2.Optimize joint control window UI
+3.Add joint highlighting feature
+
+## Datasets
 ### LAFAN1
 - Download [LAFAN1](https://github.com/ubisoft/ubisoft-laforge-animation-dataset/blob/master/lafan1/lafan1.zip) or [lafan1-resolved](https://github.com/orangeduck/lafan1-resolved#Download).
 - Drag and drop `.bvh` file.
@@ -97,16 +114,7 @@ python3 tools/convert_omomo_seq_to_motion_npz.py \
 *These motions are provided for website feature demonstration only. No model or motion downloads are offered. Please obtain assets from the original source and follow its license terms. If you have any issues, please communicate through GitHub issues.*
 
 
-## Run locally
 
-1. Install [npm](https://nodejs.org/en/download/).
-2. Install dependencies, build and start dev server:
-```bash
-npm install
-npm run build
-npm run dev
-```
-3. Open the URL printed by Vite.
 
 
 ## References

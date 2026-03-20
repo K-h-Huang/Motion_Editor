@@ -4660,8 +4660,13 @@ export class AppController {
         const target = event.target as HTMLInputElement;
         const value = parseFloat(target.value);
         if (!isNaN(value)) {
+          this.sceneController.highlightJoint(jointName);
           this.motionPlayer.setJointValue(jointName, value);
         }
+      });
+
+      jointInput.addEventListener('blur', () => {
+        this.sceneController.clearJointHighlights();
       });
 
       const jointSlider = document.createElement('input');
@@ -4677,8 +4682,17 @@ export class AppController {
         const target = event.target as HTMLInputElement;
         const value = parseFloat(target.value);
         if (!isNaN(value)) {
+          this.sceneController.highlightJoint(jointName);
           this.motionPlayer.setJointValue(jointName, value);
         }
+      });
+
+      jointSlider.addEventListener('mouseup', () => {
+        this.sceneController.clearJointHighlights();
+      });
+
+      jointSlider.addEventListener('mouseleave', () => {
+        this.sceneController.clearJointHighlights();
       });
 
       // Add smooth controls
