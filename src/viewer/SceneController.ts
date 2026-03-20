@@ -12,6 +12,7 @@ import {
   PerspectiveCamera,
   PlaneGeometry,
   PMREMGenerator,
+  Raycaster,
   SRGBColorSpace,
   Scene,
   ShadowMaterial,
@@ -168,6 +169,13 @@ export class SceneController {
   private animationFrameId = 0;
   private readonly tempTrackTarget = new Vector3();
   private readonly tempCameraOffset = new Vector3();
+  
+  // 用于射线检测的对象
+  private readonly raycaster = new Raycaster();
+  private readonly mouse = new Vector2();
+  
+  // 用于存储当前悬停的关节
+  private hoveredJointName: string | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -202,6 +210,17 @@ export class SceneController {
     this.controls.rotateSpeed = 0.9;
     this.controls.zoomSpeed = 1.0;
     this.controls.target.set(0, 0, 0);
+
+    // 添加鼠标点击事件监听器
+    this.canvas.addEventListener('click', (event) => {
+      // 计算鼠标在归一化设备坐标中的位置
+      const rect = this.canvas.getBoundingClientRect();
+      this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      
+      // 处理鼠标点击
+      this.handleMouseClick();
+    });
 
     this.pmremGenerator = null;
     this.environmentMapTarget = null;
@@ -622,6 +641,112 @@ export class SceneController {
     this.renderer.render(this.scene, this.camera);
   }
 
+  // 处理鼠标点击事件
+  private handleMouseClick(): void {
+    if (!this.currentRobot) {
+      return;
+    }
+
+    // 更新射线检测
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+
+    // 计算射线与机器人模型的交点
+    const intersects = this.raycaster.intersectObject(this.currentRobot, true);
+
+    if (intersects.length > 0) {
+      // 找到第一个交点
+      const intersect = intersects[0];
+      const object = intersect.object;
+
+      // 查找包含该对象的关节
+      const jointName = this.findJointForObject(object);
+      if (jointName) {
+        // 清除之前的高亮
+        this.clearJointHighlights();
+        // 高亮点击的关节
+        this.highlightJoint(jointName);
+      }
+    }
+  }
+
+  // 查找包含指定对象的关节
+  private findJointForObject(object: any): string | null {
+    if (!this.currentRobot) {
+      console.log('No robot found');
+      return null;
+    }
+
+    const robotAny = this.currentRobot as any;
+    if (!robotAny.joints) {
+      console.log('No joints found in robot');
+      return null;
+    }
+
+    console.log('Looking for joint for object:', object.name);
+    console.log('Robot has', Object.keys(robotAny.joints).length, 'joints');
+
+    // 方式1: 从对象向上遍历，查找包含该对象的关节
+    let current = object;
+    while (current) {
+      for (const jointName in robotAny.joints) {
+        const joint = robotAny.joints[jointName];
+        
+        // 尝试多种方式查找关节对应的链接
+        let link = null;
+        if (joint.link) {
+          link = joint.link;
+        } else if (joint.childLink) {
+          link = joint.childLink;
+        } else if (joint.children && joint.children.length > 0) {
+          link = joint.children[0];
+        }
+
+        if (link === current) {
+          console.log('Found joint', jointName, 'by traversing up from object', object.name);
+          return jointName;
+        }
+      }
+      current = current.parent;
+    }
+
+    // 方式2: 遍历所有关节，查找包含该对象的关节
+    for (const jointName in robotAny.joints) {
+      const joint = robotAny.joints[jointName];
+      
+      // 尝试多种方式查找关节对应的链接
+      let link = null;
+      if (joint.link) {
+        link = joint.link;
+        console.log('Joint', jointName, 'has link:', link.name);
+      } else if (joint.childLink) {
+        link = joint.childLink;
+        console.log('Joint', jointName, 'has childLink:', link.name);
+      } else if (joint.children && joint.children.length > 0) {
+        link = joint.children[0];
+        console.log('Joint', jointName, 'has children[0]:', link.name);
+      } else {
+        console.log('Joint', jointName, 'has no link, childLink, or children');
+        continue;
+      }
+
+      // 检查对象是否在链接的层级结构中
+      let found = false;
+      link.traverse((child: any) => {
+        if (child === object) {
+          found = true;
+          console.log('Found object', object.name, 'in joint', jointName);
+        }
+      });
+
+      if (found) {
+        return jointName;
+      }
+    }
+
+    console.log('No joint found for object:', object.name);
+    return null;
+  }
+
   private enhanceMaterial(material: unknown): unknown {
     const candidate = material as any;
     if (!candidate || typeof candidate !== 'object') {
@@ -812,11 +937,11 @@ export class SceneController {
 
     // 查找并高亮指定关节
     const robotAny = this.currentRobot as any;
-    console.log('Looking for joint:', jointName);
+    console.log('Highlighting joint:', jointName);
 
     if (robotAny.joints && robotAny.joints[jointName]) {
       const joint = robotAny.joints[jointName];
-      console.log('Found joint:', joint);
+      console.log('Found joint:', jointName);
       
       // 尝试多种方式查找关节对应的链接
       let link = null;
@@ -824,17 +949,22 @@ export class SceneController {
       // 方式1: 直接访问link属性
       if (joint.link) {
         link = joint.link;
-        console.log('Found link via joint.link:', link);
+        console.log('Found link via joint.link:', link.name);
       }
       // 方式2: 访问childLink属性
       else if (joint.childLink) {
         link = joint.childLink;
-        console.log('Found link via joint.childLink:', link);
+        console.log('Found link via joint.childLink:', link.name);
       }
       // 方式3: 访问children属性
       else if (joint.children && joint.children.length > 0) {
         link = joint.children[0];
-        console.log('Found link via joint.children[0]:', link);
+        console.log('Found link via joint.children[0]:', link.name);
+      }
+      // 方式4: 尝试访问joint对象本身
+      else {
+        console.log('Joint has no link, childLink, or children, trying joint itself');
+        link = joint;
       }
       
       if (link) {
@@ -867,6 +997,7 @@ export class SceneController {
           console.log('No direct meshes found in link');
           
           // 如果当前链接没有直接网格，尝试查找第一个包含网格的子节点
+          // 但只递归一层，避免高亮太多
           const findFirstMesh = (node: any): boolean => {
             for (let i = 0; i < node.children.length; i++) {
               const child = node.children[i];
