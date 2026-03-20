@@ -862,6 +862,8 @@ export class AppController {
   private readonly objSelect: HTMLSelectElement;
   private readonly exportMotionButton: HTMLButtonElement;
   private readonly insertKeyframeButton: HTMLButtonElement;
+  private readonly prevKeyframeButton: HTMLButtonElement;
+  private readonly nextKeyframeButton: HTMLButtonElement;
   private readonly motionFrameCountInput: HTMLInputElement;
   private readonly datasetPanel: HTMLElement;
   private readonly datasetPanelMinimizeBtn: HTMLButtonElement;
@@ -1258,6 +1260,8 @@ export class AppController {
     this.objSelect = requireElement<HTMLSelectElement>('obj-select');
     this.exportMotionButton = requireElement<HTMLButtonElement>('export-motion-btn');
     this.insertKeyframeButton = requireElement<HTMLButtonElement>('insert-keyframe-btn');
+    this.prevKeyframeButton = requireElement<HTMLButtonElement>('prev-keyframe-btn');
+    this.nextKeyframeButton = requireElement<HTMLButtonElement>('next-keyframe-btn');
     this.motionFrameCountInput = requireElement<HTMLInputElement>('motion-frame-count-input');
     this.datasetPanel = requireElement<HTMLElement>('dataset-panel');
     this.datasetPanelMinimizeBtn = requireElement<HTMLButtonElement>('dataset-panel-minimize');
@@ -1384,6 +1388,8 @@ export class AppController {
     this.motionFrameSlider.addEventListener('input', this.onMotionFrameInput);
     this.exportMotionButton.addEventListener('click', this.onExportMotionClick);
     this.insertKeyframeButton.addEventListener('click', this.onInsertKeyframeClick);
+    this.prevKeyframeButton.addEventListener('click', this.onPrevKeyframeClick);
+    this.nextKeyframeButton.addEventListener('click', this.onNextKeyframeClick);
     this.motionFrameCountInput.addEventListener('change', this.onMotionFrameCountChange);
     this.jointPanelToggle.addEventListener('click', this.onJointPanelToggleClick);
     this.datasetPanelMinimizeBtn.addEventListener('click', this.onDatasetPanelMinimizeClick);
@@ -4392,6 +4398,60 @@ export class AppController {
     this.updateKeyframeMarkers();
   };
 
+  private readonly onPrevKeyframeClick = (): void => {
+    if (!this.hasAnyMotion()) {
+      return;
+    }
+
+    const currentFrame = this.motionPlayer.getCurrentFrame();
+    const keyframeArray = Array.from(this.keyframes).sort((a, b) => a - b);
+    
+    // 找到当前帧之前的最后一个关键帧
+    let prevKeyframe = -1;
+    for (let i = keyframeArray.length - 1; i >= 0; i--) {
+      if (keyframeArray[i] < currentFrame) {
+        prevKeyframe = keyframeArray[i];
+        break;
+      }
+    }
+    
+    // 如果没有找到前一个关键帧，循环到最后一个关键帧
+    if (prevKeyframe === -1 && keyframeArray.length > 0) {
+      prevKeyframe = keyframeArray[keyframeArray.length - 1];
+    }
+    
+    if (prevKeyframe !== -1) {
+      this.motionPlayer.seek(prevKeyframe);
+    }
+  };
+
+  private readonly onNextKeyframeClick = (): void => {
+    if (!this.hasAnyMotion()) {
+      return;
+    }
+
+    const currentFrame = this.motionPlayer.getCurrentFrame();
+    const keyframeArray = Array.from(this.keyframes).sort((a, b) => a - b);
+    
+    // 找到当前帧之后的第一个关键帧
+    let nextKeyframe = -1;
+    for (const frame of keyframeArray) {
+      if (frame > currentFrame) {
+        nextKeyframe = frame;
+        break;
+      }
+    }
+    
+    // 如果没有找到下一个关键帧，循环到第一个关键帧
+    if (nextKeyframe === -1 && keyframeArray.length > 0) {
+      nextKeyframe = keyframeArray[0];
+    }
+    
+    if (nextKeyframe !== -1) {
+      this.motionPlayer.seek(nextKeyframe);
+    }
+  };
+
   private readonly onMotionFrameCountChange = (): void => {
     const newFrameCount = parseInt(this.motionFrameCountInput.value, 10);
     if (!isNaN(newFrameCount) && newFrameCount >= 2) {
@@ -4415,11 +4475,19 @@ export class AppController {
       return;
     }
 
+    // 计算进度条的实际宽度，确保关键帧标记与进度条对齐
+    const sliderElement = document.getElementById('motion-frame-slider');
+    const sliderWidth = sliderElement ? sliderElement.offsetWidth : this.keyframeMarkersContainer.offsetWidth;
+    
     this.keyframes.forEach(frameIndex => {
       const marker = document.createElement('div');
       marker.style.position = 'absolute';
       marker.style.top = '0';
-      marker.style.left = `${(frameIndex / (frameCount - 1)) * 100}%`;
+      
+      // 计算精确的位置，确保与进度条滑块对齐
+      const maxFrame = Math.max(frameCount - 1, 0);
+      const positionPercentage = maxFrame > 0 ? (frameIndex / maxFrame) * 100 : 0;
+      marker.style.left = `${positionPercentage}%`;
       marker.style.transform = 'translateX(-50%)';
       marker.style.width = '4px';
       marker.style.height = '100%';

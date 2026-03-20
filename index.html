@@ -175,7 +175,15 @@
               />
             </div>
           </div>
-          <div id="keyframe-markers" style="position: relative; width: 100%; height: 20px; margin-bottom: 0.25rem;"></div>
+          <div style="display: flex; align-items: center; margin-bottom: 0.25rem;">
+            <button id="prev-keyframe-btn" type="button" style="width: 16px; height: 20px; margin-right: 16px; margin-left: -8px; border: 1px solid rgba(146, 205, 236, 0.35); border-radius: 4px; background: rgba(255, 255, 255, 0.08); color: var(--text-main); cursor: pointer; display: flex; align-items: center; justify-content: center;">
+              &lt;
+            </button>
+            <div id="keyframe-markers" style="position: relative; flex: 1; height: 20px;"></div>
+            <button id="next-keyframe-btn" type="button" style="width: 16px; height: 20px; margin-left: 16px; margin-right: -8px; border: 1px solid rgba(146, 205, 236, 0.35); border-radius: 4px; background: rgba(255, 255, 255, 0.08); color: var(--text-main); cursor: pointer; display: flex; align-items: center; justify-content: center;">
+              &gt;
+            </button>
+          </div>
           <input
             id="motion-frame-slider"
             class="motion-controls__slider"

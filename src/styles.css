@@ -741,8 +741,9 @@ body {
 }
 
 .motion-controls__slider {
-  width: 100%;
-  margin: 0.66rem 0 0;
+  width: 90%;
+  margin: 0.66rem auto 0;
+  display: block;
   appearance: none;
   background: transparent;
   cursor: pointer;
