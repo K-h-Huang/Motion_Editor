@@ -61,7 +61,7 @@ body {
 .drop-overlay__panel {
   position: relative;
   pointer-events: auto;
-  width: min(580px, calc(100vw - 2rem));
+  width: min(400px, calc(100vw - 2rem));
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 22px;
@@ -898,8 +898,12 @@ body {
 }
 
 #app[data-drop-overlay-docked='true'] .drop-overlay__panel {
-  width: min(460px, calc(100vw - 2rem));
+  width: min(300px, calc(100vw - 2rem));
   opacity: 0.95;
+}
+
+#app[data-drop-overlay-docked='true'] .drop-overlay__hint {
+  display: none;
 }
 
 #app[data-viewer-state='error'] .state-chip {
