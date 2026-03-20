@@ -4645,28 +4645,31 @@ export class AppController {
   // 滚动到对应的关节控制面板
   private scrollToJointControl(jointName: string): void {
     // 查找包含该关节名称的关节项
-    const jointItems = this.jointList.querySelectorAll('.joint-item');
+    const jointItems = Array.from(this.jointList.querySelectorAll('.joint-item'));
     let targetItem: HTMLElement | null = null;
 
-    jointItems.forEach((item) => {
+    for (const item of jointItems) {
       const jointNameElement = item.querySelector('.joint-name');
       if (jointNameElement && jointNameElement.textContent === jointName) {
         targetItem = item as HTMLElement;
+        break;
       }
-    });
+    }
 
     if (targetItem) {
       // 滚动到该关节项
-      targetItem.scrollIntoView({
+      (targetItem as HTMLElement).scrollIntoView({
         behavior: 'smooth',
         block: 'center',
         inline: 'nearest'
       });
 
       // 添加视觉效果，例如闪烁
-      targetItem.style.backgroundColor = 'rgba(0, 255, 0, 0.2)';
+      (targetItem as HTMLElement).style.backgroundColor = 'rgba(0, 255, 0, 0.2)';
       setTimeout(() => {
-        targetItem!.style.backgroundColor = '';
+        if (targetItem) {
+          targetItem.style.backgroundColor = '';
+        }
       }, 500);
     }
   }
