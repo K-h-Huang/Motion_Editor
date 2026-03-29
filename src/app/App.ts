@@ -865,6 +865,7 @@ export class AppController {
   private readonly prevKeyframeButton: HTMLButtonElement;
   private readonly nextKeyframeButton: HTMLButtonElement;
   private readonly motionFrameCountInput: HTMLInputElement;
+  private readonly frameInsertPositionSelect: HTMLSelectElement;
   private readonly datasetPanel: HTMLElement;
   private readonly datasetPanelMinimizeBtn: HTMLButtonElement;
   private readonly statusPanel: HTMLElement;
@@ -1263,6 +1264,7 @@ export class AppController {
     this.prevKeyframeButton = requireElement<HTMLButtonElement>('prev-keyframe-btn');
     this.nextKeyframeButton = requireElement<HTMLButtonElement>('next-keyframe-btn');
     this.motionFrameCountInput = requireElement<HTMLInputElement>('motion-frame-count-input');
+    this.frameInsertPositionSelect = requireElement<HTMLSelectElement>('frame-insert-position');
     this.datasetPanel = requireElement<HTMLElement>('dataset-panel');
     this.datasetPanelMinimizeBtn = requireElement<HTMLButtonElement>('dataset-panel-minimize');
     this.statusPanel = requireElement<HTMLElement>('status-panel');
@@ -4462,7 +4464,8 @@ export class AppController {
   private readonly onMotionFrameCountChange = (): void => {
     const newFrameCount = parseInt(this.motionFrameCountInput.value, 10);
     if (!isNaN(newFrameCount) && newFrameCount >= 2) {
-      this.motionPlayer.setFrameCount(newFrameCount);
+      const insertPosition = this.frameInsertPositionSelect.value as 'start' | 'end';
+      this.motionPlayer.setFrameCount(newFrameCount, insertPosition);
       this.syncMotionControls();
       this.updateKeyframeMarkers();
     }

@@ -316,7 +316,7 @@ export class G1MotionPlayer {
     return this.clip;
   }
 
-  setFrameCount(newFrameCount: number): void {
+  setFrameCount(newFrameCount: number, insertPosition: 'start' | 'end' = 'end'): void {
     if (!this.clip || newFrameCount < 2) {
       return;
     }
@@ -330,19 +330,40 @@ export class G1MotionPlayer {
     const oldData = this.clip.data;
     const newData = new Float32Array(newFrameCount * stride);
 
-    // 复制现有帧
-    const framesToCopy = Math.min(oldFrameCount, newFrameCount);
-    for (let i = 0; i < framesToCopy * stride; i++) {
-      newData[i] = oldData[i];
-    }
-
-    // 如果新帧数更多，用最后一帧填充
     if (newFrameCount > oldFrameCount && oldFrameCount > 0) {
-      const lastFrameData = oldData.slice((oldFrameCount - 1) * stride, oldFrameCount * stride);
-      for (let i = oldFrameCount; i < newFrameCount; i++) {
-        for (let j = 0; j < stride; j++) {
-          newData[i * stride + j] = lastFrameData[j];
+      if (insertPosition === 'end') {
+        // 在末尾插入：复制现有帧，用最后一帧填充剩余部分
+        for (let i = 0; i < oldFrameCount * stride; i++) {
+          newData[i] = oldData[i];
         }
+        
+        const lastFrameData = oldData.slice((oldFrameCount - 1) * stride, oldFrameCount * stride);
+        for (let i = oldFrameCount; i < newFrameCount; i++) {
+          for (let j = 0; j < stride; j++) {
+            newData[i * stride + j] = lastFrameData[j];
+          }
+        }
+      } else {
+        // 在开头插入：用第一帧填充开头，然后复制现有帧
+        const firstFrameData = oldData.slice(0, stride);
+        for (let i = 0; i < newFrameCount - oldFrameCount; i++) {
+          for (let j = 0; j < stride; j++) {
+            newData[i * stride + j] = firstFrameData[j];
+          }
+        }
+        
+        for (let i = 0; i < oldFrameCount * stride; i++) {
+          newData[(newFrameCount - oldFrameCount) * stride + i] = oldData[i];
+        }
+        
+        // 调整当前帧位置
+        this.currentFrame += (newFrameCount - oldFrameCount);
+      }
+    } else {
+      // 减少帧数：只复制需要的帧
+      const framesToCopy = Math.min(oldFrameCount, newFrameCount);
+      for (let i = 0; i < framesToCopy * stride; i++) {
+        newData[i] = oldData[i];
       }
     }
 
