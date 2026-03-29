@@ -127,4 +127,4 @@ python3 tools/convert_omomo_seq_to_motion_npz.py \
 - [human_body_prior](https://github.com/nghorbani/human_body_prior.git)
 - [omomo_release](https://github.com/lijiaman/omomo_release.git)
 - [GMR](https://github.com/YanjieZe/GMR.git)
-- This project was completed using Codex vibe coding.
+- This project was completed using Trae vibe coding.
