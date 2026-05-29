@@ -22,8 +22,8 @@
             id="drop-overlay-dock-btn"
             type="button"
             class="drop-overlay__dock-btn"
-            aria-label="Move panel to bottom left"
-            title="Move panel to bottom left"
+            aria-label="Collapse panel beside status"
+            title="Collapse panel beside status"
           >
             −
           </button>
@@ -108,6 +108,10 @@
               <span>Reset motion to frame 1</span>
             </li>
             <li>
+              <kbd>Ctrl/Cmd+Z</kbd>
+              <span>Undo motion edit, Shift/Ctrl/Cmd+Z or Ctrl/Cmd+Y to redo</span>
+            </li>
+            <li>
               <kbd>Shift</kbd>
               <span>Toggle SMPL Mesh / Skeleton</span>
             </li>
@@ -143,12 +147,18 @@
             </button>
             <button id="motion-play-btn" type="button" class="toggle-chip">Play</button>
             <button id="motion-reset-btn" type="button" class="toggle-chip">Reset</button>
+            <button id="undo-motion-btn" type="button" class="toggle-chip" title="Undo last motion edit">
+              Undo
+            </button>
+            <button id="redo-motion-btn" type="button" class="toggle-chip" title="Redo last undone motion edit">
+              Redo
+            </button>
             <button id="prev-frame-btn" type="button" class="toggle-chip">Prev Frame</button>
             <button id="next-frame-btn" type="button" class="toggle-chip">Next Frame</button>
             <button id="insert-keyframe-btn" type="button" class="toggle-chip">Insert Keyframe</button>
             <button id="export-motion-btn" type="button" class="toggle-chip">Export</button>
           </div>
-          <p class="motion-controls__export-info">Export supports: CSV, GMR PKL, and MimicKit PKL formats.</p>
+          <p class="motion-controls__export-info">Export supports: CSV, GMR PKL, MimicKit PKL, and BeyondMimic NPZ formats.</p>
           <div id="motion-fps-control" class="motion-controls__fps" style="display: flex; gap: 1rem; margin-bottom: 0.5rem;">
             <div style="flex: 1;">
               <label for="motion-fps-input">FPS</label>
@@ -187,6 +197,65 @@
               </div>
             </div>
           </div>
+          <div id="motion-frame-copy-control" class="motion-controls__frame-copy">
+            <label for="motion-duplicate-frame-count">Copy Current Frame</label>
+            <div class="motion-controls__frame-copy-row">
+              <input
+                id="motion-duplicate-frame-count"
+                class="motion-controls__fps-input"
+                type="number"
+                min="1"
+                max="1000"
+                step="1"
+                value="10"
+                inputmode="numeric"
+                aria-label="Number of current-frame copies"
+              />
+              <button
+                id="motion-duplicate-frame-btn"
+                type="button"
+                class="toggle-chip"
+                title="Insert copies after the current frame"
+              >
+                Duplicate
+              </button>
+            </div>
+          </div>
+          <div id="motion-rest-pose-control" class="motion-controls__rest-pose">
+            <label>Prepend Zero Pose</label>
+            <div class="motion-controls__rest-pose-row">
+              <input
+                id="motion-rest-hold-frames"
+                class="motion-controls__fps-input"
+                type="number"
+                min="0"
+                max="1000"
+                step="1"
+                value="10"
+                inputmode="numeric"
+                aria-label="Zero-pose hold frames"
+              />
+              <input
+                id="motion-rest-blend-frames"
+                class="motion-controls__fps-input"
+                type="number"
+                min="0"
+                max="1000"
+                step="1"
+                value="15"
+                inputmode="numeric"
+                aria-label="Zero-pose blend frames"
+              />
+              <button
+                id="motion-prepend-rest-pose-btn"
+                type="button"
+                class="toggle-chip"
+                title="Hold zero joint pose, then blend into the original first frame"
+              >
+                Prepend
+              </button>
+            </div>
+          </div>
           <div style="display: flex; align-items: center; margin-bottom: 0.25rem;">
             <button id="prev-keyframe-btn" type="button" style="width: 16px; height: 20px; margin-right: 16px; margin-left: -8px; border: 1px solid rgba(146, 205, 236, 0.35); border-radius: 4px; background: rgba(255, 255, 255, 0.08); color: var(--text-main); cursor: pointer; display: flex; align-items: center; justify-content: center;">
               &lt;
@@ -205,6 +274,16 @@
             step="1"
             value="0"
           />
+          <div id="stability-panel" class="stability-panel" hidden>
+            <div class="stability-panel__top">
+              <button id="stability-toggle-btn" type="button" class="toggle-chip">
+                Quasi-static COM Support
+              </button>
+              <span id="stability-current" class="stability-panel__current">Off</span>
+            </div>
+            <div id="stability-timeline" class="stability-timeline" aria-label="Quasi-static COM support frame ranges"></div>
+            <ul id="stability-ranges" class="stability-ranges"></ul>
+          </div>
           <ul id="motion-warnings" class="status-panel__warnings motion-controls__warnings"></ul>
         </section>
         <section id="mode-props-panel" class="mode-props-panel" hidden>
@@ -220,6 +299,118 @@
         </div>
         <div id="joint-panel-content" class="joint-panel__content">
           <div id="joint-list" class="joint-list"></div>
+        </div>
+      </aside>
+      <aside id="curve-panel" class="curve-panel" hidden>
+        <div class="curve-panel__header">
+          <p class="curve-panel__title">Curve Editor</p>
+          <button id="curve-panel-toggle" class="curve-panel__toggle">−</button>
+        </div>
+        <div id="curve-panel-content" class="curve-panel__content">
+          <div class="curve-panel__selector-grid">
+            <label class="curve-panel__selector-field">
+              <span class="curve-panel__label">Target</span>
+              <select id="curve-channel-select" class="curve-panel__select">
+                <option value="">No curve channels</option>
+              </select>
+            </label>
+            <label class="curve-panel__selector-field">
+              <span class="curve-panel__label">Axis / DOF</span>
+              <select id="curve-axis-select" class="curve-panel__select">
+                <option value="">No axis</option>
+              </select>
+            </label>
+          </div>
+          <p class="curve-panel__hint">
+            Root Translation uses X/Y/Z. Root Rotation uses Roll/Pitch/Yaw converted from quaternion. Most joint channels are single-DOF values defined by the URDF joint axis, not XYZ.
+          </p>
+          <canvas id="curve-canvas" class="curve-panel__canvas" aria-label="Motion curve editor"></canvas>
+          <div class="curve-panel__frame-nav">
+            <div class="curve-panel__frame-header">
+              <p class="curve-panel__label">Curve Frame</p>
+              <label class="curve-panel__frame-display" for="curve-frame-input">
+                <span class="curve-panel__frame-prefix">Frame</span>
+                <input
+                  id="curve-frame-input"
+                  class="curve-panel__frame-input"
+                  type="number"
+                  min="1"
+                  max="1"
+                  step="1"
+                  value="1"
+                  aria-label="Current curve frame"
+                />
+                <span id="curve-frame-total" class="curve-panel__frame-total">/ 0</span>
+              </label>
+            </div>
+            <input
+              id="curve-frame-slider"
+              class="curve-panel__frame-slider motion-controls__slider"
+              type="range"
+              min="0"
+              max="0"
+              step="1"
+              value="0"
+            />
+          </div>
+          <p id="curve-status" class="curve-panel__status">
+            Choose a root or joint target. Drag near the curve to edit, or hold Ctrl/Cmd while dragging to select a frame range.
+          </p>
+          <div class="curve-panel__range">
+            <div class="curve-panel__range-header">
+              <p class="curve-panel__label">Range Edit</p>
+              <button id="curve-range-clear" type="button" class="toggle-chip">Clear Range</button>
+            </div>
+            <div class="curve-panel__range-grid">
+              <label>
+                <span>Start</span>
+                <input id="curve-range-start" type="number" value="1" min="1" step="1" />
+              </label>
+              <label>
+                <span>End</span>
+                <input id="curve-range-end" type="number" value="1" min="1" step="1" />
+              </label>
+              <label>
+                <span>Blend</span>
+                <input id="curve-range-blend" type="number" value="4" min="0" step="1" />
+              </label>
+            </div>
+            <div class="curve-panel__range-grid curve-panel__range-grid--compact">
+              <label>
+                <span>Offset</span>
+                <input id="curve-range-offset" type="number" value="0.1" step="0.01" />
+              </label>
+              <label>
+                <span>Smooth Passes</span>
+                <input id="curve-range-smooth-passes" type="number" value="1" min="1" max="12" step="1" />
+              </label>
+              <label>
+                <span>Copies</span>
+                <input id="curve-range-copy-count" type="number" value="1" min="1" max="1000" step="1" />
+              </label>
+            </div>
+            <div class="curve-panel__action-row">
+              <button id="curve-range-start-current" type="button" class="toggle-chip">Current → Start</button>
+              <button id="curve-range-end-current" type="button" class="toggle-chip">Current → End</button>
+            </div>
+            <div class="curve-panel__action-row">
+              <button id="curve-range-apply" type="button" class="toggle-chip">Apply Offset</button>
+              <button id="curve-range-smooth" type="button" class="toggle-chip">Smooth Range</button>
+              <button id="curve-range-duplicate" type="button" class="toggle-chip">Duplicate Range</button>
+              <button id="curve-range-crop" type="button" class="toggle-chip">Crop Range</button>
+            </div>
+          </div>
+          <div class="curve-panel__constant">
+            <p class="curve-panel__label">Lock Channel</p>
+            <div class="curve-panel__constant-grid">
+              <label>
+                <span>Value</span>
+                <input id="curve-lock-value" type="number" value="0" step="0.001" />
+              </label>
+              <button id="curve-lock-use-current" type="button" class="toggle-chip">Use Current</button>
+              <button id="curve-lock-apply" type="button" class="toggle-chip">Apply Constant</button>
+            </div>
+          </div>
         </div>
       </aside>
     </div>

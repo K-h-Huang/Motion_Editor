@@ -1,7 +1,14 @@
 import { Euler, Quaternion, Vector3 } from 'three';
 
 import { DEFAULT_ROOT_COMPONENT_COUNT, DEFAULT_ROOT_JOINT_NAME } from '../io/motion/MotionSchema';
-import type { MotionClip, UrdfRobotLike } from '../types/viewer';
+import type {
+  BeyondMimicMotionSource,
+  MotionClip,
+  MotionClipSnapshot,
+  MotionCurveChannel,
+  MotionCurveAxis,
+  UrdfRobotLike,
+} from '../types/viewer';
 
 type RequestFrameFn = (callback: FrameRequestCallback) => number;
 type CancelFrameFn = (requestId: number) => void;
@@ -9,6 +16,7 @@ type CancelFrameFn = (requestId: number) => void;
 export interface MotionBindingReport {
   missingRequiredJoints: string[];
   missingRootJoint: boolean;
+  usesRootTransformFallback: boolean;
 }
 
 export interface MotionFrameSnapshot {
@@ -16,6 +24,35 @@ export interface MotionFrameSnapshot {
   frameCount: number;
   fps: number;
   timeSeconds: number;
+}
+
+export interface RestPosePrependReport {
+  insertedFrameCount: number;
+  holdFrames: number;
+  blendFrames: number;
+  maxJointDelta: number;
+  averageJointDelta: number;
+}
+
+const ROOT_POSITION_AXES = ['x', 'y', 'z'] as const satisfies readonly MotionCurveAxis[];
+const ROOT_ROTATION_AXES = ['roll', 'pitch', 'yaw'] as const satisfies readonly MotionCurveAxis[];
+
+function buildRootPositionChannel(axis: typeof ROOT_POSITION_AXES[number]): MotionCurveChannel {
+  return {
+    id: `root_position:${axis}`,
+    label: `Root Position ${axis.toUpperCase()}`,
+    kind: 'root_position',
+    axis,
+  };
+}
+
+function buildRootRotationChannel(axis: typeof ROOT_ROTATION_AXES[number]): MotionCurveChannel {
+  return {
+    id: `root_rotation:${axis}`,
+    label: `Root Rotation ${axis[0]?.toUpperCase()}${axis.slice(1)}`,
+    kind: 'root_rotation',
+    axis,
+  };
 }
 
 interface G1MotionPlayerOptions {
@@ -49,11 +86,449 @@ function defaultCancelFrame(requestId: number): void {
   clearTimeout(requestId as unknown as ReturnType<typeof setTimeout>);
 }
 
+function duplicateFloat64Frames(
+  values: Float64Array | undefined,
+  oldFrameCount: number,
+  frameStride: number,
+  sourceFrame: number,
+  insertionFrame: number,
+  duplicateCount: number,
+): Float64Array | undefined {
+  if (!values || oldFrameCount <= 0 || frameStride <= 0) {
+    return values;
+  }
+  if (values.length !== oldFrameCount * frameStride) {
+    return values;
+  }
+
+  const newValues = new Float64Array((oldFrameCount + duplicateCount) * frameStride);
+  const copyBeforeLength = insertionFrame * frameStride;
+  newValues.set(values.subarray(0, copyBeforeLength), 0);
+
+  const sourceStart = sourceFrame * frameStride;
+  const sourceFrameValues = values.subarray(sourceStart, sourceStart + frameStride);
+  for (let copyIndex = 0; copyIndex < duplicateCount; copyIndex += 1) {
+    newValues.set(sourceFrameValues, (insertionFrame + copyIndex) * frameStride);
+  }
+
+  newValues.set(
+    values.subarray(copyBeforeLength),
+    (insertionFrame + duplicateCount) * frameStride,
+  );
+  return newValues;
+}
+
+function duplicateFloat64FrameRange(
+  values: Float64Array | undefined,
+  oldFrameCount: number,
+  frameStride: number,
+  startFrame: number,
+  endFrame: number,
+  insertionFrame: number,
+  copyCount: number,
+): Float64Array | undefined {
+  if (!values || oldFrameCount <= 0 || frameStride <= 0) {
+    return values;
+  }
+  if (values.length !== oldFrameCount * frameStride) {
+    return values;
+  }
+
+  const rangeFrameCount = Math.max(0, endFrame - startFrame + 1);
+  const insertedFrameCount = rangeFrameCount * copyCount;
+  if (rangeFrameCount <= 0 || insertedFrameCount <= 0) {
+    return values;
+  }
+
+  const newValues = new Float64Array((oldFrameCount + insertedFrameCount) * frameStride);
+  const copyBeforeLength = insertionFrame * frameStride;
+  const rangeValues = values.subarray(startFrame * frameStride, (endFrame + 1) * frameStride);
+  newValues.set(values.subarray(0, copyBeforeLength), 0);
+  for (let copyIndex = 0; copyIndex < copyCount; copyIndex += 1) {
+    newValues.set(rangeValues, (insertionFrame + copyIndex * rangeFrameCount) * frameStride);
+  }
+  newValues.set(
+    values.subarray(copyBeforeLength),
+    (insertionFrame + insertedFrameCount) * frameStride,
+  );
+  return newValues;
+}
+
+function cropFloat64FrameRange(
+  values: Float64Array | undefined,
+  oldFrameCount: number,
+  frameStride: number,
+  startFrame: number,
+  endFrame: number,
+): Float64Array | undefined {
+  if (!values || oldFrameCount <= 0 || frameStride <= 0) {
+    return values;
+  }
+  if (values.length !== oldFrameCount * frameStride) {
+    return values;
+  }
+
+  const rangeFrameCount = Math.max(0, endFrame - startFrame + 1);
+  if (rangeFrameCount <= 0) {
+    return values;
+  }
+
+  const newValues = new Float64Array(rangeFrameCount * frameStride);
+  newValues.set(values.subarray(startFrame * frameStride, (endFrame + 1) * frameStride));
+  return newValues;
+}
+
+function resizeFloat64Frames(
+  values: Float64Array | undefined,
+  oldFrameCount: number,
+  newFrameCount: number,
+  frameStride: number,
+  sourceFrame: number,
+  insertPosition: 'start' | 'end',
+): Float64Array | undefined {
+  if (!values || oldFrameCount <= 0 || newFrameCount <= 0 || frameStride <= 0) {
+    return values;
+  }
+  if (values.length !== oldFrameCount * frameStride) {
+    return values;
+  }
+
+  const newValues = new Float64Array(newFrameCount * frameStride);
+  if (newFrameCount <= oldFrameCount) {
+    newValues.set(values.subarray(0, newFrameCount * frameStride), 0);
+    return newValues;
+  }
+
+  const insertedFrameCount = newFrameCount - oldFrameCount;
+  const sourceStart = sourceFrame * frameStride;
+  const sourceFrameValues = values.subarray(sourceStart, sourceStart + frameStride);
+
+  if (insertPosition === 'start') {
+    for (let copyIndex = 0; copyIndex < insertedFrameCount; copyIndex += 1) {
+      newValues.set(sourceFrameValues, copyIndex * frameStride);
+    }
+    newValues.set(values, insertedFrameCount * frameStride);
+    return newValues;
+  }
+
+  newValues.set(values, 0);
+  for (let copyIndex = oldFrameCount; copyIndex < newFrameCount; copyIndex += 1) {
+    newValues.set(sourceFrameValues, copyIndex * frameStride);
+  }
+  return newValues;
+}
+
+function duplicateBeyondMimicSourceFrame(
+  source: BeyondMimicMotionSource | undefined,
+  oldFrameCount: number,
+  sourceFrame: number,
+  insertionFrame: number,
+  duplicateCount: number,
+): BeyondMimicMotionSource | undefined {
+  if (!source || source.frameCount !== oldFrameCount || duplicateCount <= 0) {
+    return source;
+  }
+
+  const bodyPosStride = source.bodyCount * 3;
+  const bodyQuatStride = source.bodyCount * 4;
+  return {
+    ...source,
+    frameCount: oldFrameCount + duplicateCount,
+    jointVel: duplicateFloat64Frames(
+      source.jointVel,
+      oldFrameCount,
+      source.jointCount,
+      sourceFrame,
+      insertionFrame,
+      duplicateCount,
+    ),
+    bodyPosW: duplicateFloat64Frames(
+      source.bodyPosW,
+      oldFrameCount,
+      bodyPosStride,
+      sourceFrame,
+      insertionFrame,
+      duplicateCount,
+    ) ?? source.bodyPosW,
+    bodyQuatW: duplicateFloat64Frames(
+      source.bodyQuatW,
+      oldFrameCount,
+      bodyQuatStride,
+      sourceFrame,
+      insertionFrame,
+      duplicateCount,
+    ) ?? source.bodyQuatW,
+    bodyLinVelW: duplicateFloat64Frames(
+      source.bodyLinVelW,
+      oldFrameCount,
+      bodyPosStride,
+      sourceFrame,
+      insertionFrame,
+      duplicateCount,
+    ),
+    bodyAngVelW: duplicateFloat64Frames(
+      source.bodyAngVelW,
+      oldFrameCount,
+      bodyPosStride,
+      sourceFrame,
+      insertionFrame,
+      duplicateCount,
+    ),
+  };
+}
+
+function duplicateBeyondMimicSourceFrameRange(
+  source: BeyondMimicMotionSource | undefined,
+  oldFrameCount: number,
+  startFrame: number,
+  endFrame: number,
+  insertionFrame: number,
+  copyCount: number,
+): BeyondMimicMotionSource | undefined {
+  if (!source || source.frameCount !== oldFrameCount || copyCount <= 0) {
+    return source;
+  }
+
+  const rangeFrameCount = Math.max(0, endFrame - startFrame + 1);
+  const insertedFrameCount = rangeFrameCount * copyCount;
+  if (insertedFrameCount <= 0) {
+    return source;
+  }
+
+  const bodyPosStride = source.bodyCount * 3;
+  const bodyQuatStride = source.bodyCount * 4;
+  return {
+    ...source,
+    frameCount: oldFrameCount + insertedFrameCount,
+    jointVel: duplicateFloat64FrameRange(
+      source.jointVel,
+      oldFrameCount,
+      source.jointCount,
+      startFrame,
+      endFrame,
+      insertionFrame,
+      copyCount,
+    ),
+    bodyPosW: duplicateFloat64FrameRange(
+      source.bodyPosW,
+      oldFrameCount,
+      bodyPosStride,
+      startFrame,
+      endFrame,
+      insertionFrame,
+      copyCount,
+    ) ?? source.bodyPosW,
+    bodyQuatW: duplicateFloat64FrameRange(
+      source.bodyQuatW,
+      oldFrameCount,
+      bodyQuatStride,
+      startFrame,
+      endFrame,
+      insertionFrame,
+      copyCount,
+    ) ?? source.bodyQuatW,
+    bodyLinVelW: duplicateFloat64FrameRange(
+      source.bodyLinVelW,
+      oldFrameCount,
+      bodyPosStride,
+      startFrame,
+      endFrame,
+      insertionFrame,
+      copyCount,
+    ),
+    bodyAngVelW: duplicateFloat64FrameRange(
+      source.bodyAngVelW,
+      oldFrameCount,
+      bodyPosStride,
+      startFrame,
+      endFrame,
+      insertionFrame,
+      copyCount,
+    ),
+  };
+}
+
+function cropBeyondMimicSourceFrameRange(
+  source: BeyondMimicMotionSource | undefined,
+  oldFrameCount: number,
+  startFrame: number,
+  endFrame: number,
+): BeyondMimicMotionSource | undefined {
+  if (!source || source.frameCount !== oldFrameCount) {
+    return source;
+  }
+
+  const rangeFrameCount = Math.max(0, endFrame - startFrame + 1);
+  if (rangeFrameCount <= 0) {
+    return source;
+  }
+
+  const bodyPosStride = source.bodyCount * 3;
+  const bodyQuatStride = source.bodyCount * 4;
+  return {
+    ...source,
+    frameCount: rangeFrameCount,
+    jointVel: cropFloat64FrameRange(
+      source.jointVel,
+      oldFrameCount,
+      source.jointCount,
+      startFrame,
+      endFrame,
+    ),
+    bodyPosW: cropFloat64FrameRange(
+      source.bodyPosW,
+      oldFrameCount,
+      bodyPosStride,
+      startFrame,
+      endFrame,
+    ) ?? source.bodyPosW,
+    bodyQuatW: cropFloat64FrameRange(
+      source.bodyQuatW,
+      oldFrameCount,
+      bodyQuatStride,
+      startFrame,
+      endFrame,
+    ) ?? source.bodyQuatW,
+    bodyLinVelW: cropFloat64FrameRange(
+      source.bodyLinVelW,
+      oldFrameCount,
+      bodyPosStride,
+      startFrame,
+      endFrame,
+    ),
+    bodyAngVelW: cropFloat64FrameRange(
+      source.bodyAngVelW,
+      oldFrameCount,
+      bodyPosStride,
+      startFrame,
+      endFrame,
+    ),
+  };
+}
+
+function prependBeyondMimicSourceFrames(
+  source: BeyondMimicMotionSource | undefined,
+  oldFrameCount: number,
+  insertedFrameCount: number,
+): BeyondMimicMotionSource | undefined {
+  if (!source || source.frameCount !== oldFrameCount || insertedFrameCount <= 0) {
+    return source;
+  }
+
+  const bodyPosStride = source.bodyCount * 3;
+  const bodyQuatStride = source.bodyCount * 4;
+  return {
+    ...source,
+    frameCount: oldFrameCount + insertedFrameCount,
+    jointVel: duplicateFloat64Frames(
+      source.jointVel,
+      oldFrameCount,
+      source.jointCount,
+      0,
+      0,
+      insertedFrameCount,
+    ),
+    bodyPosW: duplicateFloat64Frames(
+      source.bodyPosW,
+      oldFrameCount,
+      bodyPosStride,
+      0,
+      0,
+      insertedFrameCount,
+    ) ?? source.bodyPosW,
+    bodyQuatW: duplicateFloat64Frames(
+      source.bodyQuatW,
+      oldFrameCount,
+      bodyQuatStride,
+      0,
+      0,
+      insertedFrameCount,
+    ) ?? source.bodyQuatW,
+    bodyLinVelW: duplicateFloat64Frames(
+      source.bodyLinVelW,
+      oldFrameCount,
+      bodyPosStride,
+      0,
+      0,
+      insertedFrameCount,
+    ),
+    bodyAngVelW: duplicateFloat64Frames(
+      source.bodyAngVelW,
+      oldFrameCount,
+      bodyPosStride,
+      0,
+      0,
+      insertedFrameCount,
+    ),
+  };
+}
+
+function resizeBeyondMimicSourceFrames(
+  source: BeyondMimicMotionSource | undefined,
+  oldFrameCount: number,
+  newFrameCount: number,
+  insertPosition: 'start' | 'end',
+): BeyondMimicMotionSource | undefined {
+  if (!source || source.frameCount !== oldFrameCount) {
+    return source;
+  }
+
+  const sourceFrame = insertPosition === 'start' ? 0 : Math.max(0, oldFrameCount - 1);
+  const bodyPosStride = source.bodyCount * 3;
+  const bodyQuatStride = source.bodyCount * 4;
+  return {
+    ...source,
+    frameCount: newFrameCount,
+    jointVel: resizeFloat64Frames(
+      source.jointVel,
+      oldFrameCount,
+      newFrameCount,
+      source.jointCount,
+      sourceFrame,
+      insertPosition,
+    ),
+    bodyPosW: resizeFloat64Frames(
+      source.bodyPosW,
+      oldFrameCount,
+      newFrameCount,
+      bodyPosStride,
+      sourceFrame,
+      insertPosition,
+    ) ?? source.bodyPosW,
+    bodyQuatW: resizeFloat64Frames(
+      source.bodyQuatW,
+      oldFrameCount,
+      newFrameCount,
+      bodyQuatStride,
+      sourceFrame,
+      insertPosition,
+    ) ?? source.bodyQuatW,
+    bodyLinVelW: resizeFloat64Frames(
+      source.bodyLinVelW,
+      oldFrameCount,
+      newFrameCount,
+      bodyPosStride,
+      sourceFrame,
+      insertPosition,
+    ),
+    bodyAngVelW: resizeFloat64Frames(
+      source.bodyAngVelW,
+      oldFrameCount,
+      newFrameCount,
+      bodyPosStride,
+      sourceFrame,
+      insertPosition,
+    ),
+  };
+}
+
 export class G1MotionPlayer {
   public onFrameChanged: ((snapshot: MotionFrameSnapshot) => void) | null = null;
   public onPlaybackStateChanged: ((isPlaying: boolean) => void) | null = null;
   public onWarning: ((warning: string) => void) | null = null;
   public onJointAnglesChanged: ((jointNames: string[], jointValues: number[]) => void) | null = null;
+  public onClipDataChanged: ((frameIndex: number) => void) | null = null;
+  public onClipEditStarted: ((mergeKey: string) => void) | null = null;
 
   private readonly now: () => number;
   private readonly requestFrame: RequestFrameFn;
@@ -82,6 +557,7 @@ export class G1MotionPlayer {
   private bindingReport: MotionBindingReport = {
     missingRequiredJoints: [],
     missingRootJoint: false,
+    usesRootTransformFallback: false,
   };
   private currentFrame = 0;
   private isPlaying = false;
@@ -116,26 +592,32 @@ export class G1MotionPlayer {
     return {
       missingRequiredJoints: [...this.bindingReport.missingRequiredJoints],
       missingRootJoint: this.bindingReport.missingRootJoint,
+      usesRootTransformFallback: this.bindingReport.usesRootTransformFallback,
     };
   }
 
-  loadClip(clip: MotionClip | null): MotionBindingReport {
+  loadClip(clip: MotionClip | null, initialFrame = 0): MotionBindingReport {
     this.pause();
     this.clip = clip;
     this.currentFrame = 0;
+    if (clip) {
+      this.resetBoundRobotRootTransform();
+    }
     this.bindingReport = this.rebindRobot();
 
     if (!this.clip) {
       return {
         missingRequiredJoints: [...this.bindingReport.missingRequiredJoints],
         missingRootJoint: this.bindingReport.missingRootJoint,
+        usesRootTransformFallback: this.bindingReport.usesRootTransformFallback,
       };
     }
 
-    this.applyFrame(0);
+    this.applyFrame(this.clampFrame(initialFrame));
     return {
       missingRequiredJoints: [...this.bindingReport.missingRequiredJoints],
       missingRootJoint: this.bindingReport.missingRootJoint,
+      usesRootTransformFallback: this.bindingReport.usesRootTransformFallback,
     };
   }
 
@@ -182,6 +664,21 @@ export class G1MotionPlayer {
     }
   }
 
+  withFrameAppliedSilently<T>(frameIndex: number, callback: () => T): T | null {
+    if (!this.clip) {
+      return null;
+    }
+
+    const originalFrame = this.currentFrame;
+    const targetFrame = this.clampFrame(frameIndex);
+    this.applyFrame(targetFrame, false);
+    try {
+      return callback();
+    } finally {
+      this.applyFrame(originalFrame, false);
+    }
+  }
+
   reset(): void {
     this.pause();
     if (!this.clip) {
@@ -202,6 +699,8 @@ export class G1MotionPlayer {
     this.onPlaybackStateChanged = null;
     this.onWarning = null;
     this.onJointAnglesChanged = null;
+    this.onClipDataChanged = null;
+    this.onClipEditStarted = null;
   }
 
   getJointNames(): string[] {
@@ -258,11 +757,197 @@ export class G1MotionPlayer {
     };
   }
 
+  getCurveChannels(): MotionCurveChannel[] {
+    if (!this.clip) {
+      return [];
+    }
+
+    return [
+      ...ROOT_POSITION_AXES.map(buildRootPositionChannel),
+      ...ROOT_ROTATION_AXES.map(buildRootRotationChannel),
+      ...this.clip.schema.jointNames.map((jointName) => ({
+        id: `joint:${jointName}`,
+        label: jointName,
+        kind: 'joint' as const,
+        jointName,
+      })),
+    ];
+  }
+
+  getCurveChannelById(channelId: string): MotionCurveChannel | null {
+    return this.getCurveChannels().find((channel) => channel.id === channelId) ?? null;
+  }
+
+  getChannelValues(channelId: string): Float32Array {
+    if (!this.clip) {
+      return new Float32Array();
+    }
+
+    const channel = this.getCurveChannelById(channelId);
+    if (!channel) {
+      return new Float32Array();
+    }
+
+    if (channel.kind === 'root_position' && channel.axis) {
+      return this.getRootPositionChannelValues(channel.axis);
+    }
+
+    if (channel.kind === 'root_rotation' && channel.axis) {
+      return this.getRootRotationChannelValues(channel.axis);
+    }
+
+    if (channel.kind === 'joint' && channel.jointName) {
+      return this.getJointChannelValues(channel.jointName);
+    }
+
+    return new Float32Array();
+  }
+
+  setChannelValue(channelId: string, frameIndex: number, value: number): boolean {
+    if (!this.clip) {
+      return false;
+    }
+
+    const channel = this.getCurveChannelById(channelId);
+    if (!channel) {
+      return false;
+    }
+
+    this.beginClipEdit(`curve:${channelId}`);
+    const frame = this.clampFrame(frameIndex);
+    const didWrite = this.writeChannelValue(channel, frame, value);
+    if (!didWrite) {
+      return false;
+    }
+
+    this.commitClipEdit(frame);
+    return true;
+  }
+
+  setChannelConstant(
+    channelId: string,
+    value: number,
+    startFrame = 0,
+    endFrame = this.clip ? this.clip.frameCount - 1 : 0,
+  ): boolean {
+    if (!this.clip || !Number.isFinite(value)) {
+      return false;
+    }
+
+    const channel = this.getCurveChannelById(channelId);
+    if (!channel) {
+      return false;
+    }
+
+    const { start, end } = this.normalizeFrameRange(startFrame, endFrame);
+    this.beginClipEdit(`channel_constant:${channelId}`);
+    let didWrite = false;
+    for (let frame = start; frame <= end; frame += 1) {
+      didWrite = this.writeChannelValue(channel, frame, value) || didWrite;
+    }
+
+    if (!didWrite) {
+      return false;
+    }
+
+    this.commitClipEdit(this.currentFrame, start, end);
+    return true;
+  }
+
+  offsetChannelRange(
+    channelId: string,
+    startFrame: number,
+    endFrame: number,
+    delta: number,
+    blendFrames = 0,
+  ): boolean {
+    if (!this.clip) {
+      return false;
+    }
+
+    const channel = this.getCurveChannelById(channelId);
+    if (!channel || !Number.isFinite(delta)) {
+      return false;
+    }
+
+    const { start, end } = this.normalizeFrameRange(startFrame, endFrame);
+    const transitionFrames = Math.max(0, Math.floor(blendFrames));
+    const sourceValues = this.getChannelValues(channelId);
+    if (sourceValues.length !== this.clip.frameCount) {
+      return false;
+    }
+
+    this.beginClipEdit(`range_offset:${channelId}`);
+    const affectedStart = Math.max(0, start - transitionFrames);
+    const affectedEnd = Math.min(this.clip.frameCount - 1, end + transitionFrames);
+    let didChange = false;
+
+    for (let frame = affectedStart; frame <= affectedEnd; frame += 1) {
+      const weight = this.getRangeBlendWeight(frame, start, end, transitionFrames);
+      if (weight <= 0) {
+        continue;
+      }
+
+      const nextValue = sourceValues[frame] + delta * weight;
+      didChange = this.writeChannelValue(channel, frame, nextValue) || didChange;
+    }
+
+    if (didChange) {
+      this.commitClipEdit(this.currentFrame, affectedStart, affectedEnd);
+    }
+
+    return didChange;
+  }
+
+  smoothChannelRange(channelId: string, startFrame: number, endFrame: number, passes = 1): boolean {
+    if (!this.clip) {
+      return false;
+    }
+
+    const channel = this.getCurveChannelById(channelId);
+    if (!channel) {
+      return false;
+    }
+
+    const { start, end } = this.normalizeFrameRange(startFrame, endFrame);
+    if (end - start < 2) {
+      return false;
+    }
+
+    const iterationCount = Math.max(1, Math.min(12, Math.floor(passes)));
+    let working = this.getChannelValues(channelId);
+    if (working.length !== this.clip.frameCount) {
+      return false;
+    }
+
+    this.beginClipEdit(`range_smooth:${channelId}`);
+    for (let iteration = 0; iteration < iterationCount; iteration += 1) {
+      const nextValues = new Float32Array(working);
+      for (let frame = start + 1; frame < end; frame += 1) {
+        nextValues[frame] =
+          (working[frame - 1] + working[frame] * 2 + working[frame + 1]) / 4;
+      }
+      working = nextValues;
+    }
+
+    let didChange = false;
+    for (let frame = start + 1; frame < end; frame += 1) {
+      didChange = this.writeChannelValue(channel, frame, working[frame]) || didChange;
+    }
+
+    if (didChange) {
+      this.commitClipEdit(this.currentFrame, start, end);
+    }
+
+    return didChange;
+  }
+
   setRootPosition(x: number, y: number, z: number): void {
     if (!this.clip) {
       return;
     }
 
+    this.beginClipEdit('root_position');
     const base = this.currentFrame * this.clip.stride;
     const data = this.clip.data;
     data[base] = x;
@@ -271,6 +956,7 @@ export class G1MotionPlayer {
 
     // 更新当前帧以反映更改
     this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
   }
 
   setRootRotation(x: number, y: number, z: number, w: number): void {
@@ -278,6 +964,7 @@ export class G1MotionPlayer {
       return;
     }
 
+    this.beginClipEdit('root_rotation');
     const base = this.currentFrame * this.clip.stride;
     const data = this.clip.data;
     data[base + 3] = x;
@@ -287,6 +974,7 @@ export class G1MotionPlayer {
 
     // 更新当前帧以反映更改
     this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
   }
 
   setJointValue(jointName: string, value: number): void {
@@ -300,6 +988,7 @@ export class G1MotionPlayer {
       return;
     }
 
+    this.beginClipEdit(`joint:${jointName}`);
     const rootComponentCount = schema.rootComponentCount || DEFAULT_ROOT_COMPONENT_COUNT;
     const base = this.currentFrame * this.clip.stride;
     this.clip.data[base + rootComponentCount + jointIndex] = value;
@@ -310,10 +999,266 @@ export class G1MotionPlayer {
     }
 
     this.onJointAnglesChanged?.(this.getJointNames(), this.getCurrentJointValues());
+    this.onClipDataChanged?.(this.currentFrame);
+  }
+
+  setJointValueAtFrame(jointName: string, frameIndex: number, value: number): boolean {
+    if (!this.clip) {
+      return false;
+    }
+
+    const jointIndex = this.clip.schema.jointNames.indexOf(jointName);
+    if (jointIndex === -1) {
+      return false;
+    }
+
+    this.beginClipEdit(`joint:${jointName}`);
+    const didWrite = this.writeJointValueAtFrame(jointName, frameIndex, value);
+    if (!didWrite) {
+      return false;
+    }
+    this.commitClipEdit(frameIndex);
+    return true;
   }
 
   getClip(): any {
     return this.clip;
+  }
+
+  duplicateFrame(
+    frameIndex: number,
+    duplicateCount: number,
+    insertPosition: 'before' | 'after' = 'after',
+  ): boolean {
+    if (!this.clip || this.clip.frameCount <= 0) {
+      return false;
+    }
+
+    const count = Math.max(0, Math.floor(duplicateCount));
+    if (count <= 0) {
+      return false;
+    }
+
+    const oldFrameCount = this.clip.frameCount;
+    const sourceFrame = this.clampFrame(frameIndex);
+    const insertionFrame =
+      insertPosition === 'before' ? sourceFrame : Math.min(oldFrameCount, sourceFrame + 1);
+    const newFrameCount = oldFrameCount + count;
+    const stride = this.clip.stride;
+    const oldData = this.clip.data;
+    const newData = new Float32Array(newFrameCount * stride);
+    const copyBeforeLength = insertionFrame * stride;
+    const sourceFrameData = oldData.subarray(sourceFrame * stride, sourceFrame * stride + stride);
+
+    this.beginClipEdit(`duplicate_frame:${insertPosition}`);
+    newData.set(oldData.subarray(0, copyBeforeLength), 0);
+    for (let copyIndex = 0; copyIndex < count; copyIndex += 1) {
+      newData.set(sourceFrameData, (insertionFrame + copyIndex) * stride);
+    }
+    newData.set(oldData.subarray(copyBeforeLength), (insertionFrame + count) * stride);
+
+    this.clip.data = newData;
+    this.clip.frameCount = newFrameCount;
+    this.clip.beyondMimicSource = duplicateBeyondMimicSourceFrame(
+      this.clip.beyondMimicSource,
+      oldFrameCount,
+      sourceFrame,
+      insertionFrame,
+      count,
+    );
+
+    if (this.currentFrame >= insertionFrame) {
+      this.currentFrame += count;
+    }
+    this.currentFrame = Math.max(0, Math.min(newFrameCount - 1, this.currentFrame));
+    this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
+    return true;
+  }
+
+  duplicateFrameRange(
+    startFrame: number,
+    endFrame: number,
+    copyCount: number,
+    insertPosition: 'before' | 'after' = 'after',
+  ): boolean {
+    if (!this.clip || this.clip.frameCount <= 0) {
+      return false;
+    }
+
+    const count = Math.max(0, Math.floor(copyCount));
+    if (count <= 0) {
+      return false;
+    }
+
+    const oldFrameCount = this.clip.frameCount;
+    const normalizedStart = Math.max(
+      0,
+      Math.min(oldFrameCount - 1, Math.floor(Math.min(startFrame, endFrame))),
+    );
+    const normalizedEnd = Math.max(
+      normalizedStart,
+      Math.min(oldFrameCount - 1, Math.floor(Math.max(startFrame, endFrame))),
+    );
+    const rangeFrameCount = normalizedEnd - normalizedStart + 1;
+    const insertedFrameCount = rangeFrameCount * count;
+    const insertionFrame =
+      insertPosition === 'before' ? normalizedStart : Math.min(oldFrameCount, normalizedEnd + 1);
+    const newFrameCount = oldFrameCount + insertedFrameCount;
+    const stride = this.clip.stride;
+    const oldData = this.clip.data;
+    const newData = new Float32Array(newFrameCount * stride);
+    const copyBeforeLength = insertionFrame * stride;
+    const rangeData = oldData.subarray(
+      normalizedStart * stride,
+      (normalizedEnd + 1) * stride,
+    );
+
+    this.beginClipEdit(`duplicate_range:${insertPosition}`);
+    newData.set(oldData.subarray(0, copyBeforeLength), 0);
+    for (let copyIndex = 0; copyIndex < count; copyIndex += 1) {
+      newData.set(rangeData, (insertionFrame + copyIndex * rangeFrameCount) * stride);
+    }
+    newData.set(oldData.subarray(copyBeforeLength), (insertionFrame + insertedFrameCount) * stride);
+
+    this.clip.data = newData;
+    this.clip.frameCount = newFrameCount;
+    this.clip.beyondMimicSource = duplicateBeyondMimicSourceFrameRange(
+      this.clip.beyondMimicSource,
+      oldFrameCount,
+      normalizedStart,
+      normalizedEnd,
+      insertionFrame,
+      count,
+    );
+
+    if (this.currentFrame >= insertionFrame) {
+      this.currentFrame += insertedFrameCount;
+    }
+    this.currentFrame = Math.max(0, Math.min(newFrameCount - 1, this.currentFrame));
+    this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
+    return true;
+  }
+
+  cropFrameRange(startFrame: number, endFrame: number): boolean {
+    if (!this.clip || this.clip.frameCount <= 0) {
+      return false;
+    }
+
+    const oldFrameCount = this.clip.frameCount;
+    const normalizedStart = Math.max(
+      0,
+      Math.min(oldFrameCount - 1, Math.floor(Math.min(startFrame, endFrame))),
+    );
+    const normalizedEnd = Math.max(
+      normalizedStart,
+      Math.min(oldFrameCount - 1, Math.floor(Math.max(startFrame, endFrame))),
+    );
+    const rangeFrameCount = normalizedEnd - normalizedStart + 1;
+    if (
+      rangeFrameCount <= 0 ||
+      (normalizedStart === 0 && normalizedEnd === oldFrameCount - 1)
+    ) {
+      return false;
+    }
+
+    const stride = this.clip.stride;
+    const oldData = this.clip.data;
+    const newData = new Float32Array(rangeFrameCount * stride);
+    newData.set(oldData.subarray(normalizedStart * stride, (normalizedEnd + 1) * stride));
+
+    this.beginClipEdit(`crop_range:${normalizedStart}:${normalizedEnd}`);
+    this.clip.data = newData;
+    this.clip.frameCount = rangeFrameCount;
+    this.clip.beyondMimicSource = cropBeyondMimicSourceFrameRange(
+      this.clip.beyondMimicSource,
+      oldFrameCount,
+      normalizedStart,
+      normalizedEnd,
+    );
+
+    if (this.currentFrame < normalizedStart) {
+      this.currentFrame = 0;
+    } else if (this.currentFrame > normalizedEnd) {
+      this.currentFrame = rangeFrameCount - 1;
+    } else {
+      this.currentFrame -= normalizedStart;
+    }
+    this.currentFrame = Math.max(0, Math.min(rangeFrameCount - 1, this.currentFrame));
+    this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
+    return true;
+  }
+
+  prependZeroPose(holdFrames: number, blendFrames: number): RestPosePrependReport | null {
+    if (!this.clip || this.clip.frameCount <= 0) {
+      return null;
+    }
+
+    const holdCount = Math.max(0, Math.floor(holdFrames));
+    const blendCount = Math.max(0, Math.floor(blendFrames));
+    const insertedFrameCount = holdCount + blendCount;
+    if (insertedFrameCount <= 0) {
+      return null;
+    }
+
+    const oldFrameCount = this.clip.frameCount;
+    const stride = this.clip.stride;
+    const rootComponentCount = this.clip.schema.rootComponentCount || DEFAULT_ROOT_COMPONENT_COUNT;
+    const jointCount = this.clip.schema.jointNames.length;
+    const oldData = this.clip.data;
+    const firstFrame = oldData.subarray(0, stride);
+    const restFrame = new Float32Array(firstFrame);
+    for (let jointIndex = 0; jointIndex < jointCount; jointIndex += 1) {
+      restFrame[rootComponentCount + jointIndex] = 0;
+    }
+
+    let maxJointDelta = 0;
+    let totalJointDelta = 0;
+    for (let jointIndex = 0; jointIndex < jointCount; jointIndex += 1) {
+      const delta = Math.abs(firstFrame[rootComponentCount + jointIndex] ?? 0);
+      maxJointDelta = Math.max(maxJointDelta, delta);
+      totalJointDelta += delta;
+    }
+
+    this.beginClipEdit('prepend_zero_pose');
+    const newData = new Float32Array((oldFrameCount + insertedFrameCount) * stride);
+    for (let frameIndex = 0; frameIndex < holdCount; frameIndex += 1) {
+      newData.set(restFrame, frameIndex * stride);
+    }
+
+    for (let blendIndex = 0; blendIndex < blendCount; blendIndex += 1) {
+      const targetBase = (holdCount + blendIndex) * stride;
+      const t = (blendIndex + 1) / (blendCount + 1);
+      for (let componentIndex = 0; componentIndex < stride; componentIndex += 1) {
+        const restValue = restFrame[componentIndex] ?? 0;
+        const targetValue = firstFrame[componentIndex] ?? 0;
+        newData[targetBase + componentIndex] = restValue + (targetValue - restValue) * t;
+      }
+    }
+
+    newData.set(oldData, insertedFrameCount * stride);
+    this.clip.data = newData;
+    this.clip.frameCount = oldFrameCount + insertedFrameCount;
+    this.clip.beyondMimicSource = prependBeyondMimicSourceFrames(
+      this.clip.beyondMimicSource,
+      oldFrameCount,
+      insertedFrameCount,
+    );
+
+    this.currentFrame += insertedFrameCount;
+    this.currentFrame = Math.max(0, Math.min(this.clip.frameCount - 1, this.currentFrame));
+    this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
+
+    return {
+      insertedFrameCount,
+      holdFrames: holdCount,
+      blendFrames: blendCount,
+      maxJointDelta,
+      averageJointDelta: jointCount > 0 ? totalJointDelta / jointCount : 0,
+    };
   }
 
   setFrameCount(newFrameCount: number, insertPosition: 'start' | 'end' = 'end'): void {
@@ -326,6 +1271,7 @@ export class G1MotionPlayer {
       return;
     }
 
+    this.beginClipEdit(`frame_count:${insertPosition}`);
     const stride = this.clip.stride;
     const oldData = this.clip.data;
     const newData = new Float32Array(newFrameCount * stride);
@@ -369,10 +1315,17 @@ export class G1MotionPlayer {
 
     this.clip.data = newData;
     this.clip.frameCount = newFrameCount;
+    this.clip.beyondMimicSource = resizeBeyondMimicSourceFrames(
+      this.clip.beyondMimicSource,
+      oldFrameCount,
+      newFrameCount,
+      insertPosition,
+    );
 
     // 确保当前帧在有效范围内
     this.currentFrame = Math.min(this.currentFrame, newFrameCount - 1);
     this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
   }
 
   getCurrentFrame(): number {
@@ -397,6 +1350,7 @@ export class G1MotionPlayer {
       return;
     }
 
+    this.beginClipEdit(`smooth_joint:${jointName}`);
     const rootComponentCount = schema.rootComponentCount || DEFAULT_ROOT_COMPONENT_COUNT;
     const stride = this.clip.stride;
     const data = this.clip.data;
@@ -470,6 +1424,7 @@ export class G1MotionPlayer {
 
     // Update current frame to reflect changes
     this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
   }
 
   interpolateBetweenKeyframes(keyframeList?: number[]): void {
@@ -527,6 +1482,7 @@ export class G1MotionPlayer {
       return;
     }
 
+    this.beginClipEdit('interpolate_keyframes');
     console.log('Starting interpolation between keyframes:', keyframes);
 
     // 在关键帧之间进行线性插值
@@ -578,6 +1534,254 @@ export class G1MotionPlayer {
 
     // 更新当前帧以反映更改
     this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
+  }
+
+  translateRootMotion(deltaX: number, deltaY: number, deltaZ: number): void {
+    if (!this.clip) {
+      return;
+    }
+
+    this.beginClipEdit('translate_root_motion');
+    for (let frame = 0; frame < this.clip.frameCount; frame += 1) {
+      const base = frame * this.clip.stride;
+      this.clip.data[base] += deltaX;
+      this.clip.data[base + 1] += deltaY;
+      this.clip.data[base + 2] += deltaZ;
+    }
+
+    this.applyFrame(this.currentFrame);
+    this.onClipDataChanged?.(this.currentFrame);
+  }
+
+  private normalizeFrameRange(startFrame: number, endFrame: number): { start: number; end: number } {
+    const start = this.clampFrame(Math.min(startFrame, endFrame));
+    const end = this.clampFrame(Math.max(startFrame, endFrame));
+    return { start, end };
+  }
+
+  private getRangeBlendWeight(
+    frame: number,
+    startFrame: number,
+    endFrame: number,
+    blendFrames: number,
+  ): number {
+    if (frame >= startFrame && frame <= endFrame) {
+      return 1;
+    }
+
+    if (blendFrames <= 0) {
+      return 0;
+    }
+
+    if (frame < startFrame && frame >= startFrame - blendFrames) {
+      return 1 - (startFrame - frame) / (blendFrames + 1);
+    }
+
+    if (frame > endFrame && frame <= endFrame + blendFrames) {
+      return 1 - (frame - endFrame) / (blendFrames + 1);
+    }
+
+    return 0;
+  }
+
+  private commitClipEdit(frameIndex: number, affectedStartFrame = frameIndex, affectedEndFrame = frameIndex): void {
+    if (this.currentFrame >= affectedStartFrame && this.currentFrame <= affectedEndFrame) {
+      this.applyFrame(this.currentFrame);
+    }
+    this.onClipDataChanged?.(frameIndex);
+  }
+
+  private beginClipEdit(mergeKey: string): void {
+    if (!this.clip) {
+      return;
+    }
+    this.onClipEditStarted?.(mergeKey);
+  }
+
+  static cloneClip(clip: MotionClip): MotionClipSnapshot {
+    return {
+      name: clip.name,
+      sourcePath: clip.sourcePath,
+      fps: clip.fps,
+      frameCount: clip.frameCount,
+      stride: clip.stride,
+      schema: {
+        rootJointName: clip.schema.rootJointName,
+        rootComponentCount: clip.schema.rootComponentCount,
+        jointNames: [...clip.schema.jointNames],
+      },
+      csvMode: clip.csvMode,
+      sourceColumnCount: clip.sourceColumnCount,
+      data: new Float32Array(clip.data),
+      beyondMimicSource: clip.beyondMimicSource,
+    };
+  }
+
+  private writeChannelValue(channel: MotionCurveChannel, frameIndex: number, value: number): boolean {
+    if (channel.kind === 'root_position' && channel.axis) {
+      return this.writeRootPositionAxisValue(frameIndex, channel.axis, value);
+    }
+
+    if (channel.kind === 'root_rotation' && channel.axis) {
+      return this.writeRootRotationAxisValue(frameIndex, channel.axis, value);
+    }
+
+    if (channel.kind === 'joint' && channel.jointName) {
+      return this.writeJointValueAtFrame(channel.jointName, frameIndex, value);
+    }
+
+    return false;
+  }
+
+  private getRootPositionChannelValues(axis: MotionCurveAxis): Float32Array {
+    if (!this.clip) {
+      return new Float32Array();
+    }
+
+    const offset = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+    const values = new Float32Array(this.clip.frameCount);
+    for (let frame = 0; frame < this.clip.frameCount; frame += 1) {
+      values[frame] = this.clip.data[frame * this.clip.stride + offset];
+    }
+    return values;
+  }
+
+  private getRootRotationChannelValues(axis: MotionCurveAxis): Float32Array {
+    if (!this.clip) {
+      return new Float32Array();
+    }
+
+    const axisIndex = axis === 'roll' ? 0 : axis === 'pitch' ? 1 : 2;
+    const values = new Float32Array(this.clip.frameCount);
+    let previousValue = 0;
+
+    for (let frame = 0; frame < this.clip.frameCount; frame += 1) {
+      const base = frame * this.clip.stride;
+      this.tempQuat.set(
+        this.clip.data[base + 3],
+        this.clip.data[base + 4],
+        this.clip.data[base + 5],
+        this.clip.data[base + 6],
+      );
+      if (this.tempQuat.lengthSq() < 1e-10) {
+        this.tempQuat.identity();
+      } else {
+        this.tempQuat.normalize();
+      }
+
+      this.tempEuler.setFromQuaternion(this.tempQuat, 'XYZ');
+      const rawValue =
+        axisIndex === 0 ? this.tempEuler.x : axisIndex === 1 ? this.tempEuler.y : this.tempEuler.z;
+      values[frame] = frame === 0 ? rawValue : this.unwrapAngle(rawValue, previousValue);
+      previousValue = values[frame];
+    }
+
+    return values;
+  }
+
+  private getJointChannelValues(jointName: string): Float32Array {
+    if (!this.clip) {
+      return new Float32Array();
+    }
+
+    const jointIndex = this.clip.schema.jointNames.indexOf(jointName);
+    if (jointIndex === -1) {
+      return new Float32Array();
+    }
+
+    const rootComponentCount = this.clip.schema.rootComponentCount || DEFAULT_ROOT_COMPONENT_COUNT;
+    const values = new Float32Array(this.clip.frameCount);
+    for (let frame = 0; frame < this.clip.frameCount; frame += 1) {
+      values[frame] = this.clip.data[frame * this.clip.stride + rootComponentCount + jointIndex];
+    }
+    return values;
+  }
+
+  private writeRootPositionAxisValue(frameIndex: number, axis: MotionCurveAxis, value: number): boolean {
+    if (!this.clip) {
+      return false;
+    }
+
+    const offset = axis === 'x' ? 0 : axis === 'y' ? 1 : axis === 'z' ? 2 : -1;
+    if (offset < 0) {
+      return false;
+    }
+
+    const frame = this.clampFrame(frameIndex);
+    const base = frame * this.clip.stride;
+    this.clip.data[base + offset] = value;
+    return true;
+  }
+
+  private writeRootRotationAxisValue(frameIndex: number, axis: MotionCurveAxis, value: number): boolean {
+    if (!this.clip) {
+      return false;
+    }
+
+    const frame = this.clampFrame(frameIndex);
+    const base = frame * this.clip.stride;
+    this.tempQuat.set(
+      this.clip.data[base + 3],
+      this.clip.data[base + 4],
+      this.clip.data[base + 5],
+      this.clip.data[base + 6],
+    );
+    if (this.tempQuat.lengthSq() < 1e-10) {
+      this.tempQuat.identity();
+    } else {
+      this.tempQuat.normalize();
+    }
+
+    this.tempEuler.setFromQuaternion(this.tempQuat, 'XYZ');
+    if (axis === 'roll') {
+      this.tempEuler.x = value;
+    } else if (axis === 'pitch') {
+      this.tempEuler.y = value;
+    } else if (axis === 'yaw') {
+      this.tempEuler.z = value;
+    } else {
+      return false;
+    }
+
+    this.tempQuat.setFromEuler(this.tempEuler);
+    this.clip.data[base + 3] = this.tempQuat.x;
+    this.clip.data[base + 4] = this.tempQuat.y;
+    this.clip.data[base + 5] = this.tempQuat.z;
+    this.clip.data[base + 6] = this.tempQuat.w;
+    return true;
+  }
+
+  private writeJointValueAtFrame(jointName: string, frameIndex: number, value: number): boolean {
+    if (!this.clip) {
+      return false;
+    }
+
+    const schema = this.clip.schema;
+    const jointIndex = schema.jointNames.indexOf(jointName);
+    if (jointIndex === -1) {
+      return false;
+    }
+
+    const rootComponentCount = schema.rootComponentCount || DEFAULT_ROOT_COMPONENT_COUNT;
+    const frame = this.clampFrame(frameIndex);
+    const base = frame * this.clip.stride;
+    this.clip.data[base + rootComponentCount + jointIndex] = value;
+    return true;
+  }
+
+  private unwrapAngle(value: number, previousValue: number): number {
+    let unwrapped = value;
+    const twoPi = Math.PI * 2;
+
+    while (unwrapped - previousValue > Math.PI) {
+      unwrapped -= twoPi;
+    }
+    while (unwrapped - previousValue < -Math.PI) {
+      unwrapped += twoPi;
+    }
+
+    return unwrapped;
   }
 
   private readonly handleAnimationFrame = (timestamp: number): void => {
@@ -620,6 +1824,7 @@ export class G1MotionPlayer {
       return {
         missingRequiredJoints: [],
         missingRootJoint: false,
+        usesRootTransformFallback: false,
       };
     }
 
@@ -627,6 +1832,7 @@ export class G1MotionPlayer {
       return {
         missingRequiredJoints: [...schema.jointNames],
         missingRootJoint: true,
+        usesRootTransformFallback: false,
       };
     }
 
@@ -649,13 +1855,8 @@ export class G1MotionPlayer {
     const report: MotionBindingReport = {
       missingRequiredJoints: missingRequired,
       missingRootJoint: !this.rootSetter && !this.rootTransformFallback,
+      usesRootTransformFallback: !this.rootSetter && Boolean(this.rootTransformFallback),
     };
-
-    if (!report.missingRootJoint && !this.rootSetter && this.rootTransformFallback && this.clip) {
-      this.onWarning?.(
-        `Joint "${rootJointName}" was not found. Root motion is applied to robot transform fallback.`,
-      );
-    }
 
     if (report.missingRootJoint && this.clip) {
       this.onWarning?.(
@@ -787,7 +1988,32 @@ export class G1MotionPlayer {
     };
   }
 
-  private applyFrame(frameIndex: number): void {
+  private resetBoundRobotRootTransform(): void {
+    const anchor = this.rootTransformAnchor;
+    const target = this.robot as
+      | ({
+          position?: { copy?: (value: any) => unknown };
+          quaternion?: { copy?: (value: any) => unknown };
+          updateMatrixWorld?: (force?: boolean) => unknown;
+          matrixWorldNeedsUpdate?: boolean;
+        } | null);
+    if (
+      !anchor ||
+      !target?.position ||
+      !target?.quaternion ||
+      typeof target.position.copy !== 'function' ||
+      typeof target.quaternion.copy !== 'function'
+    ) {
+      return;
+    }
+
+    target.position.copy(anchor.basePosition);
+    target.quaternion.copy(anchor.baseQuaternion);
+    target.matrixWorldNeedsUpdate = true;
+    target.updateMatrixWorld?.(true);
+  }
+
+  private applyFrame(frameIndex: number, notify = true): void {
     if (!this.clip) {
       return;
     }
@@ -863,13 +2089,14 @@ export class G1MotionPlayer {
     }
 
     this.currentFrame = frame;
-    this.onFrameChanged?.({
-      frameIndex: frame,
-      frameCount: this.clip.frameCount,
-      fps: this.clip.fps,
-      timeSeconds: frame / Math.max(this.clip.fps, 1),
-    });
-    this.onJointAnglesChanged?.(this.getJointNames(), this.getCurrentJointValues());
+    if (notify) {
+      this.onFrameChanged?.({
+        frameIndex: frame,
+        frameCount: this.clip.frameCount,
+        fps: this.clip.fps,
+        timeSeconds: frame / Math.max(this.clip.fps, 1),
+      });
+      this.onJointAnglesChanged?.(this.getJointNames(), this.getCurrentJointValues());
+    }
   }
 }
-

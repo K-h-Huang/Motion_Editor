@@ -6,8 +6,18 @@ export type ViewerState =
   | 'playing'
   | 'error';
 export type ViewMode = 'free' | 'root_lock';
+export type MotionCurveChannelKind = 'root_position' | 'root_rotation' | 'joint';
+export type MotionCurveAxis = 'x' | 'y' | 'z' | 'roll' | 'pitch' | 'yaw';
 
 export type DroppedFileMap = Map<string, File>;
+
+export interface MotionCurveChannel {
+  id: string;
+  label: string;
+  kind: MotionCurveChannelKind;
+  axis?: MotionCurveAxis;
+  jointName?: string;
+}
 
 export interface UrdfJointLike {
   jointType?: string;
@@ -44,6 +54,17 @@ export interface MotionSchema {
 
 export type MotionCsvMode = 'header' | 'ordered';
 
+export interface BeyondMimicMotionSource {
+  frameCount: number;
+  jointCount: number;
+  bodyCount: number;
+  jointVel?: Float64Array;
+  bodyPosW: Float64Array;
+  bodyQuatW: Float64Array;
+  bodyLinVelW?: Float64Array;
+  bodyAngVelW?: Float64Array;
+}
+
 export interface MotionClip {
   name: string;
   sourcePath: string;
@@ -54,6 +75,20 @@ export interface MotionClip {
   csvMode: MotionCsvMode;
   sourceColumnCount: number;
   data: Float32Array;
+  beyondMimicSource?: BeyondMimicMotionSource;
+}
+
+export interface MotionClipSnapshot {
+  name: string;
+  sourcePath: string;
+  fps: number;
+  frameCount: number;
+  stride: number;
+  schema: MotionSchema;
+  csvMode: MotionCsvMode;
+  sourceColumnCount: number;
+  data: Float32Array;
+  beyondMimicSource?: BeyondMimicMotionSource;
 }
 
 export interface CsvMotionLoadResult {

@@ -7,6 +7,7 @@ import URDFLoader from 'urdf-loader';
 import {
   DEFAULT_ROOT_COMPONENT_COUNT,
   DEFAULT_ROOT_JOINT_NAME,
+  normalizeJointOrderForGmr,
 } from '../motion/MotionSchema';
 import type {
   DroppedFileMap,
@@ -49,7 +50,7 @@ function buildMotionSchema(robot: UrdfRobotLike): MotionSchema {
   return {
     rootJointName: floatingRootJointName ?? DEFAULT_ROOT_JOINT_NAME,
     rootComponentCount: DEFAULT_ROOT_COMPONENT_COUNT,
-    jointNames,
+    jointNames: normalizeJointOrderForGmr(jointNames),
   };
 }
 

@@ -329,6 +329,17 @@ function toRawBytesFromPickleparser(value: unknown): Uint8Array {
     return output;
   }
 
+  if (isRecord(value)) {
+    const args = (value as { args?: unknown }).args;
+    if (
+      Array.isArray(args) &&
+      typeof args[0] === 'string' &&
+      (args[1] === 'latin1' || args[1] === 'latin-1')
+    ) {
+      return stringToBytes(args[0]);
+    }
+  }
+
   throw new Error('Unsupported pickleparser ndarray raw data payload.');
 }
 
