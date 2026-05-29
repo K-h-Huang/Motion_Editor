@@ -6,6 +6,20 @@ English | [中文](README.zh.md)
 
 Its core purpose is to quickly load robot models in the browser, create and edit motion sequences, and export them in various formats for model validation, data inspection, debugging, and demos.
 
+## Update Log
+- 2026-5-30:
+1.Thanks to @zhaozigu for contributing the new curve editor feature!
+2.Curve editor is available in the `feature/curve-editor` branch.
+3.GitHub Pages not yet updated, recommend local deployment to use this feature.
+
+- 2026-3-29:
+1.Add option to choose insertion position (before or after existing data) when adjusting motion duration.
+
+- 2026-3-20:
+1.Optimize the interface and add keyframe control buttons, allowing keyframes to be switched using the keyframe button.
+2.Optimize joint control window UI
+3.Add joint highlighting feature
+
 ## Usage
 
 ### Playback controls
@@ -52,12 +66,6 @@ npm run build
 npm run dev
 ```
 3. Open the URL printed by Vite.
-
-## Update Log
-- 2026-3-20：
-1.Optimize the interface and add keyframe control buttons, allowing keyframes to be switched using the keyframe button.
-2.Optimize joint control window UI
-3.Add joint highlighting feature
 
 ## Datasets
 ### LAFAN1
