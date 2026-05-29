@@ -27,7 +27,7 @@ const BVH_UNIT_SCALE: Record<BvhLinearUnit, number> = {
   inch: 0.0254,
   feet: 0.3048,
 };
-const SKELETON_HIGHLIGHT_COLOR = '#7ef9ff';
+const SKELETON_HIGHLIGHT_COLOR = '#111111';
 
 function normalizeLinearUnit(linearUnit: BvhLinearUnit): BvhLinearUnit {
   if (BVH_LINEAR_UNITS.includes(linearUnit)) {

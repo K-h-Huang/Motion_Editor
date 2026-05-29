@@ -242,26 +242,18 @@ export class CsvMotionService {
     };
   }
 
-  toCsv(clip: any, robotHeight: number = 0): string {
-    console.log('CsvMotionService.toCsv called with clip:', clip, 'robotHeight:', robotHeight);
+  toCsv(clip: any): string {
     const lines: string[] = [];
 
     for (let frameIndex = 0; frameIndex < clip.frameCount; frameIndex++) {
       const base = frameIndex * clip.stride;
       const row: string[] = [];
       for (let i = 0; i < clip.stride; i++) {
-        let value = clip.data[base + i];
-        // 调整root z轴值（假设z轴是第3个分量，索引为2）
-        if (i === 2) { // root_z
-          const originalValue = value;
-          value += robotHeight;
-          console.log(`Frame ${frameIndex}: root_z original=${originalValue}, height=${robotHeight}, adjusted=${value}`);
-        }
-        row.push(String(parseFloat(value)));
+        const value = clip.data[base + i];
+        row.push(String(parseFloat(String(value))));
       }
       lines.push(row.join(','));
     }
-    console.log(`Created ${lines.length} lines`);
 
     return lines.join('\n');
   }
@@ -352,4 +344,3 @@ export function parseMotionCsv(
     warnings: [...warnings],
   };
 }
-

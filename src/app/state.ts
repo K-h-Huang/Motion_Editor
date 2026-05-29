@@ -11,7 +11,7 @@ const STATE_COPY: Record<ViewerState, StateCopy> = {
     chip: 'Idle',
     title: 'Wait for load',
     dropHint:
-      'Use the Models / Motions / Objects dropdowns to browse presets.\nDrag and drop to load models (.bvh, .urdf, .npz/.pkl (SMPL)) or MimicKit motion (.pkl).',
+      'Use the Models / Motions / Objects dropdowns to browse presets.\nDrag and drop to load models (.bvh, .urdf, .npz/.pkl (SMPL)) or motion (.csv, BeyondMimic .npz, MimicKit/GMR .pkl).',
   },
   drag_over: {
     chip: 'Drop',
@@ -27,7 +27,7 @@ const STATE_COPY: Record<ViewerState, StateCopy> = {
     chip: 'Model Ready',
     title: 'Model Loaded',
     dropHint:
-      'Choose an optional object, then load a compatible motion from the dropdown or by drag and drop (.csv, MimicKit .pkl, .npz, .bvh).',
+      'Choose an optional object, then load a compatible motion from the dropdown or by drag and drop (.csv, BeyondMimic .npz, MimicKit/GMR .pkl, .bvh).',
   },
   playing: {
     chip: 'Playing',

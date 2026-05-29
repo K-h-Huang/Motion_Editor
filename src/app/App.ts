@@ -2,17 +2,25 @@ import type {
   DroppedFileMap,
   LoadedRobotResult,
   MotionClip,
+  MotionClipSnapshot,
   ViewMode,
   ViewerState,
 } from '../types/viewer';
-import { Box3, Vector3 } from 'three';
+import { Box3, Euler, Quaternion, Vector3 } from 'three';
 import { dataTransferToFileMap, fileListToFileMap } from '../io/drop/dataTransferToFileMap';
 import { registerDropHandlers } from '../io/drop/registerDropHandlers';
+import {
+  buildStabilityFrameRanges,
+  StabilityAnalyzer,
+  type StabilityEvaluation,
+  type StabilityFrameRange,
+} from '../analysis/StabilityAnalyzer';
 import {
   BVH_LINEAR_UNITS,
   BvhMotionService,
   type BvhLinearUnit,
 } from '../io/motion/BvhMotionService';
+import { BeyondMimicMotionService } from '../io/motion/BeyondMimicMotionService';
 import { CsvMotionService } from '../io/motion/CsvMotionService';
 import { MimicKitMotionService } from '../io/motion/MimicKitMotionService';
 import { GmrMotionService } from '../io/motion/GmrMotionService';
@@ -22,9 +30,14 @@ import { ObjLoadService, type ObjModelLoadResult } from '../io/object/ObjLoadSer
 import { getBaseName, normalizePath } from '../io/urdf/pathResolver';
 import { UrdfLoadService } from '../io/urdf/UrdfLoadService';
 import { BvhMotionPlayer } from '../motion/BvhMotionPlayer';
-import { G1MotionPlayer, type MotionFrameSnapshot } from '../motion/G1MotionPlayer';
+import {
+  G1MotionPlayer,
+  type MotionFrameSnapshot,
+  type RestPosePrependReport,
+} from '../motion/G1MotionPlayer';
 import { formatMissingObjectModelWarning } from '../motion/objectWarnings';
 import { SmplMotionPlayer } from '../motion/SmplMotionPlayer';
+import { MotionCurveEditor } from './MotionCurveEditor';
 import { SceneController } from '../viewer/SceneController';
 import { getStateCopy } from './state';
 
@@ -82,7 +95,7 @@ interface PresetModelDefinition {
 }
 
 interface PresetMotionDefinition {
-  kind: 'csv' | 'mimickit' | 'gmr' | 'bvh' | 'smpl';
+  kind: 'csv' | 'mimickit' | 'gmr' | 'beyondmimic' | 'bvh' | 'smpl';
   files?: PresetAssetFile[];
   path?: string;
   selectedMotionPath?: string;
@@ -101,11 +114,19 @@ interface ViewerPresetManifest {
   capturedObjects: PresetAssetFile[];
 }
 
-type UrdfMotionKind = 'csv' | 'mimickit' | 'gmr';
+type UrdfMotionKind = 'csv' | 'mimickit' | 'gmr' | 'beyondmimic';
 type ViewerMotionKind = UrdfMotionKind | 'bvh' | 'smpl';
+const MAX_MOTION_HISTORY_ENTRIES = 30;
+const MOTION_HISTORY_MERGE_WINDOW_MS = 750;
+
+interface MotionHistoryEntry {
+  clip: MotionClipSnapshot;
+  keyframes: number[];
+  currentFrame: number;
+}
 
 function isUrdfMotionKind(kind: ViewerMotionKind | null): kind is UrdfMotionKind {
-  return kind === 'csv' || kind === 'mimickit' || kind === 'gmr';
+  return kind === 'csv' || kind === 'mimickit' || kind === 'gmr' || kind === 'beyondmimic';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -251,9 +272,9 @@ function parsePresetManifest(value: unknown): ViewerPresetManifest {
       }
 
       const kind = parseNonEmptyString(item.motion.kind, `presets[${index}].motion.kind`).toLowerCase();
-      if (kind !== 'csv' && kind !== 'mimickit' && kind !== 'gmr' && kind !== 'bvh' && kind !== 'smpl') {
+      if (kind !== 'csv' && kind !== 'mimickit' && kind !== 'gmr' && kind !== 'beyondmimic' && kind !== 'bvh' && kind !== 'smpl') {
         throw new Error(
-          `presets[${index}].motion.kind must be "csv", "mimickit", "gmr", "bvh", or "smpl".`,
+          `presets[${index}].motion.kind must be "csv", "mimickit", "gmr", "beyondmimic", "bvh", or "smpl".`,
         );
       }
 
@@ -514,7 +535,7 @@ function collectPresetSmplModels(manifest: ViewerPresetManifest | null): PresetA
 }
 
 type SelectableModelKind = 'urdf' | 'smpl' | 'bvh';
-type SelectableMotionKind = 'csv' | 'mimickit' | 'gmr' | 'bvh' | 'smpl';
+type SelectableMotionKind = 'csv' | 'mimickit' | 'gmr' | 'beyondmimic' | 'bvh' | 'smpl';
 
 interface SelectableModelOption {
   key: string;
@@ -572,7 +593,6 @@ function inferUrdfBindingTag(path: string): string | null {
   if (normalized.includes('/h1/') || normalized.includes('h1_description')) {
     return 'urdf:h1';
   }
-
   return null;
 }
 
@@ -619,7 +639,6 @@ function formatSelectableModelLabel(kind: SelectableModelKind, path: string): st
   if (bindingTag === 'urdf:h1_2') {
     return 'URDF · H1-2';
   }
-
   return `URDF · ${getBaseName(path) || path}`;
 }
 
@@ -633,6 +652,9 @@ function formatSelectableMotionLabel(kind: SelectableMotionKind, path: string): 
   }
   if (kind === 'gmr') {
     return `GMR · ${baseName}`;
+  }
+  if (kind === 'beyondmimic') {
+    return `BeyondMimic · ${baseName}`;
   }
   if (kind === 'bvh') {
     return `BVH · ${baseName}`;
@@ -820,6 +842,7 @@ export class AppController {
   private readonly sceneController: SceneController;
   private readonly urdfLoadService: UrdfLoadService;
   private readonly csvMotionService: CsvMotionService;
+  private readonly beyondMimicMotionService: BeyondMimicMotionService;
   private readonly mimicKitMotionService: MimicKitMotionService;
   private readonly gmrMotionService: GmrMotionService;
   private readonly bvhMotionService: BvhMotionService;
@@ -847,11 +870,18 @@ export class AppController {
   private readonly motionControlsSection: HTMLElement;
   private readonly motionPlayButton: HTMLButtonElement;
   private readonly motionResetButton: HTMLButtonElement;
+  private readonly undoMotionButton: HTMLButtonElement;
+  private readonly redoMotionButton: HTMLButtonElement;
   private readonly motionFpsControl: HTMLDivElement;
   private readonly motionFpsInput: HTMLInputElement;
   private readonly motionFrameSlider: HTMLInputElement;
   private readonly motionTitle: HTMLParagraphElement;
   private readonly motionFrameLabel: HTMLSpanElement;
+  private readonly stabilityPanel: HTMLElement;
+  private readonly stabilityToggleButton: HTMLButtonElement;
+  private readonly stabilityCurrent: HTMLSpanElement;
+  private readonly stabilityTimeline: HTMLDivElement;
+  private readonly stabilityRangesList: HTMLUListElement;
   private readonly folderInput: HTMLInputElement;
   private readonly fileInput: HTMLInputElement;
   private readonly pickFolderButton: HTMLButtonElement;
@@ -866,6 +896,11 @@ export class AppController {
   private readonly nextKeyframeButton: HTMLButtonElement;
   private readonly motionFrameCountInput: HTMLInputElement;
   private readonly frameInsertPositionSelect: HTMLSelectElement;
+  private readonly duplicateFrameCountInput: HTMLInputElement;
+  private readonly duplicateFrameButton: HTMLButtonElement;
+  private readonly restPoseHoldFramesInput: HTMLInputElement;
+  private readonly restPoseBlendFramesInput: HTMLInputElement;
+  private readonly prependRestPoseButton: HTMLButtonElement;
   private readonly datasetPanel: HTMLElement;
   private readonly datasetPanelMinimizeBtn: HTMLButtonElement;
   private readonly statusPanel: HTMLElement;
@@ -874,7 +909,35 @@ export class AppController {
   private readonly jointPanelToggle: HTMLButtonElement;
   private readonly jointPanelContent: HTMLDivElement;
   private readonly jointList: HTMLDivElement;
+  private readonly curvePanel: HTMLElement;
+  private readonly curvePanelToggle: HTMLButtonElement;
+  private readonly curvePanelContent: HTMLDivElement;
+  private readonly curveChannelSelect: HTMLSelectElement;
+  private readonly curveAxisSelect: HTMLSelectElement;
+  private readonly curveCanvas: HTMLCanvasElement;
+  private readonly curveFrameSlider: HTMLInputElement;
+  private readonly curveFrameInput: HTMLInputElement;
+  private readonly curveFrameTotal: HTMLSpanElement;
+  private readonly curveStatus: HTMLParagraphElement;
+  private readonly curveRangeStartInput: HTMLInputElement;
+  private readonly curveRangeEndInput: HTMLInputElement;
+  private readonly curveRangeBlendInput: HTMLInputElement;
+  private readonly curveRangeOffsetInput: HTMLInputElement;
+  private readonly curveRangeSmoothPassesInput: HTMLInputElement;
+  private readonly curveRangeCopyCountInput: HTMLInputElement;
+  private readonly curveRangeClearButton: HTMLButtonElement;
+  private readonly curveRangeStartCurrentButton: HTMLButtonElement;
+  private readonly curveRangeEndCurrentButton: HTMLButtonElement;
+  private readonly curveRangeApplyButton: HTMLButtonElement;
+  private readonly curveRangeSmoothButton: HTMLButtonElement;
+  private readonly curveRangeDuplicateButton: HTMLButtonElement;
+  private readonly curveRangeCropButton: HTMLButtonElement;
+  private readonly curveLockValueInput: HTMLInputElement;
+  private readonly curveLockUseCurrentButton: HTMLButtonElement;
+  private readonly curveLockApplyButton: HTMLButtonElement;
+  private readonly curveEditor: MotionCurveEditor;
   private isJointPanelCollapsed = false;
+  private isCurvePanelCollapsed = false;
   private isDatasetPanelMinimized = false;
   private isStatusPanelMinimized = false;
   private readonly removeDropHandlers: () => void;
@@ -892,6 +955,7 @@ export class AppController {
   private showCollision = false;
   private lastLoadResult: LoadedRobotResult | null = null;
   private currentMotionClip: MotionClip | null = null;
+  private isEditingCurveFrameInput = false;
   private currentBvhMotion:
     | {
         name: string;
@@ -941,6 +1005,11 @@ export class AppController {
   private currentMotionSourcePath: string | null = null;
   private motionWarnings: string[] = [];
   private motionFrameSnapshot: MotionFrameSnapshot | null = null;
+  private stabilityAnalyzer: StabilityAnalyzer | null = null;
+  private isStabilityOverlayEnabled = false;
+  private stabilityEvaluations: StabilityEvaluation[] = [];
+  private stabilityRanges: StabilityFrameRange[] = [];
+  private currentStabilityEvaluation: StabilityEvaluation | null = null;
   private isDropOverlayDocked = false;
   private isMotionPlaying = false;
   private bvhLinearUnit: BvhLinearUnit = 'm';
@@ -972,22 +1041,58 @@ export class AppController {
   private isObjCatalogLoading = false;
   private keyframes: Set<number> = new Set();
   private keyframeMarkersContainer: HTMLElement | null = null;
+  private selectedCurveChannelId: string | null = null;
+  private selectedCurveRangeStartFrame: number | null = null;
+  private selectedCurveRangeEndFrame: number | null = null;
+  private motionUndoStack: MotionHistoryEntry[] = [];
+  private motionRedoStack: MotionHistoryEntry[] = [];
+  private pendingMotionHistoryEntry: MotionHistoryEntry | null = null;
+  private pendingMotionHistoryMergeKey: string | null = null;
+  private lastMotionHistoryMergeKey: string | null = null;
+  private lastMotionHistoryCommitAt = 0;
+  private isRestoringMotionHistory = false;
+  private motionHistoryFrameOverride: number | null = null;
+  private motionHistoryAutoCommitDepth = 0;
 
   private readonly onWindowResize = (): void => {
     this.sceneController.resize();
+    this.curveEditor.resize();
   };
 
   private readonly onWindowKeyDown = (event: KeyboardEvent): void => {
-    if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing || event.repeat) {
-      return;
-    }
-
     const eventTarget = event.target as HTMLElement | null;
     if (
       eventTarget?.tagName === 'INPUT' ||
       eventTarget?.tagName === 'TEXTAREA' ||
       eventTarget?.isContentEditable
     ) {
+      return;
+    }
+
+    if (event.altKey || event.isComposing || event.repeat) {
+      return;
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      if (!isUrdfMotionKind(this.currentMotionKind)) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      if (key === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) {
+          this.redoMotionEdit();
+        } else {
+          this.undoMotionEdit();
+        }
+        return;
+      }
+
+      if (key === 'y') {
+        event.preventDefault();
+        this.redoMotionEdit();
+      }
       return;
     }
 
@@ -1188,6 +1293,14 @@ export class AppController {
     this.resetActiveMotion();
   };
 
+  private readonly onUndoMotionClick = (): void => {
+    this.undoMotionEdit();
+  };
+
+  private readonly onRedoMotionClick = (): void => {
+    this.redoMotionEdit();
+  };
+
   private readonly onMotionFrameInput = (): void => {
     if (!this.hasAnyMotion()) {
       return;
@@ -1200,6 +1313,90 @@ export class AppController {
 
     this.seekActiveMotion(frameIndex);
   };
+
+  private readonly onStabilityToggleClick = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip || !this.lastLoadResult) {
+      return;
+    }
+
+    this.isStabilityOverlayEnabled = !this.isStabilityOverlayEnabled;
+    if (this.isStabilityOverlayEnabled) {
+      this.ensureStabilityAnalyzer();
+      this.recomputeStabilityAnalysis();
+      this.updateStabilityCurrentFrame();
+    } else {
+      this.sceneController.clearStabilityOverlay();
+    }
+    this.syncStabilityPanel();
+  };
+
+  private readonly onCurveFrameInput = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip) {
+      return;
+    }
+
+    const frameIndex = Number(this.curveFrameSlider.value);
+    if (!Number.isFinite(frameIndex)) {
+      return;
+    }
+
+    this.seekActiveMotion(frameIndex);
+  };
+
+  private readonly onCurveFrameNumberInput = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip) {
+      return;
+    }
+
+    if (document.activeElement !== this.curveFrameInput) {
+      return;
+    }
+
+    this.isEditingCurveFrameInput = true;
+  };
+
+  private readonly onCurveFrameNumberChange = (): void => {
+    this.isEditingCurveFrameInput = false;
+    this.jumpToCurveFrameInput();
+  };
+
+  private readonly onCurveFrameNumberKeyDown = (event: KeyboardEvent): void => {
+    if (event.key !== 'Enter') {
+      return;
+    }
+
+    event.preventDefault();
+    this.isEditingCurveFrameInput = false;
+    this.jumpToCurveFrameInput();
+  };
+
+  private readonly onCurveFrameInputBlur = (): void => {
+    this.isEditingCurveFrameInput = false;
+    this.jumpToCurveFrameInput();
+  };
+
+  private jumpToCurveFrameInput(): void {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip) {
+      return;
+    }
+
+    const frameCount = this.currentMotionClip.frameCount;
+    if (frameCount <= 0) {
+      return;
+    }
+
+    const rawValue = Number(this.curveFrameInput.value);
+    if (!Number.isFinite(rawValue)) {
+      this.syncCurveFrameControls(
+        frameCount,
+        this.motionFrameSnapshot?.frameIndex ?? this.motionPlayer.getCurrentFrame(),
+      );
+      return;
+    }
+
+    const frameIndex = Math.max(0, Math.min(frameCount - 1, Math.floor(rawValue) - 1));
+    this.seekActiveMotion(frameIndex);
+  }
 
   private readonly onMotionFpsInput = (): void => {
     const rawFps = Number(this.motionFpsInput.value);
@@ -1246,11 +1443,18 @@ export class AppController {
     this.motionControlsSection = requireElement<HTMLElement>('motion-controls-section');
     this.motionPlayButton = requireElement<HTMLButtonElement>('motion-play-btn');
     this.motionResetButton = requireElement<HTMLButtonElement>('motion-reset-btn');
+    this.undoMotionButton = requireElement<HTMLButtonElement>('undo-motion-btn');
+    this.redoMotionButton = requireElement<HTMLButtonElement>('redo-motion-btn');
     this.motionFpsControl = requireElement<HTMLDivElement>('motion-fps-control');
     this.motionFpsInput = requireElement<HTMLInputElement>('motion-fps-input');
     this.motionFrameSlider = requireElement<HTMLInputElement>('motion-frame-slider');
     this.motionTitle = requireElement<HTMLParagraphElement>('motion-title');
     this.motionFrameLabel = requireElement<HTMLSpanElement>('motion-frame-label');
+    this.stabilityPanel = requireElement<HTMLElement>('stability-panel');
+    this.stabilityToggleButton = requireElement<HTMLButtonElement>('stability-toggle-btn');
+    this.stabilityCurrent = requireElement<HTMLSpanElement>('stability-current');
+    this.stabilityTimeline = requireElement<HTMLDivElement>('stability-timeline');
+    this.stabilityRangesList = requireElement<HTMLUListElement>('stability-ranges');
     this.folderInput = requireElement<HTMLInputElement>('folder-input');
     this.fileInput = requireElement<HTMLInputElement>('file-input');
     this.pickFolderButton = requireElement<HTMLButtonElement>('pick-folder-btn');
@@ -1265,6 +1469,11 @@ export class AppController {
     this.nextKeyframeButton = requireElement<HTMLButtonElement>('next-keyframe-btn');
     this.motionFrameCountInput = requireElement<HTMLInputElement>('motion-frame-count-input');
     this.frameInsertPositionSelect = requireElement<HTMLSelectElement>('frame-insert-position');
+    this.duplicateFrameCountInput = requireElement<HTMLInputElement>('motion-duplicate-frame-count');
+    this.duplicateFrameButton = requireElement<HTMLButtonElement>('motion-duplicate-frame-btn');
+    this.restPoseHoldFramesInput = requireElement<HTMLInputElement>('motion-rest-hold-frames');
+    this.restPoseBlendFramesInput = requireElement<HTMLInputElement>('motion-rest-blend-frames');
+    this.prependRestPoseButton = requireElement<HTMLButtonElement>('motion-prepend-rest-pose-btn');
     this.datasetPanel = requireElement<HTMLElement>('dataset-panel');
     this.datasetPanelMinimizeBtn = requireElement<HTMLButtonElement>('dataset-panel-minimize');
     this.statusPanel = requireElement<HTMLElement>('status-panel');
@@ -1273,6 +1482,32 @@ export class AppController {
     this.jointPanelToggle = requireElement<HTMLButtonElement>('joint-panel-toggle');
     this.jointPanelContent = requireElement<HTMLDivElement>('joint-panel-content');
     this.jointList = requireElement<HTMLDivElement>('joint-list');
+    this.curvePanel = requireElement<HTMLElement>('curve-panel');
+    this.curvePanelToggle = requireElement<HTMLButtonElement>('curve-panel-toggle');
+    this.curvePanelContent = requireElement<HTMLDivElement>('curve-panel-content');
+    this.curveChannelSelect = requireElement<HTMLSelectElement>('curve-channel-select');
+    this.curveAxisSelect = requireElement<HTMLSelectElement>('curve-axis-select');
+    this.curveCanvas = requireElement<HTMLCanvasElement>('curve-canvas');
+    this.curveFrameSlider = requireElement<HTMLInputElement>('curve-frame-slider');
+    this.curveFrameInput = requireElement<HTMLInputElement>('curve-frame-input');
+    this.curveFrameTotal = requireElement<HTMLSpanElement>('curve-frame-total');
+    this.curveStatus = requireElement<HTMLParagraphElement>('curve-status');
+    this.curveRangeStartInput = requireElement<HTMLInputElement>('curve-range-start');
+    this.curveRangeEndInput = requireElement<HTMLInputElement>('curve-range-end');
+    this.curveRangeBlendInput = requireElement<HTMLInputElement>('curve-range-blend');
+    this.curveRangeOffsetInput = requireElement<HTMLInputElement>('curve-range-offset');
+    this.curveRangeSmoothPassesInput = requireElement<HTMLInputElement>('curve-range-smooth-passes');
+    this.curveRangeCopyCountInput = requireElement<HTMLInputElement>('curve-range-copy-count');
+    this.curveRangeClearButton = requireElement<HTMLButtonElement>('curve-range-clear');
+    this.curveRangeStartCurrentButton = requireElement<HTMLButtonElement>('curve-range-start-current');
+    this.curveRangeEndCurrentButton = requireElement<HTMLButtonElement>('curve-range-end-current');
+    this.curveRangeApplyButton = requireElement<HTMLButtonElement>('curve-range-apply');
+    this.curveRangeSmoothButton = requireElement<HTMLButtonElement>('curve-range-smooth');
+    this.curveRangeDuplicateButton = requireElement<HTMLButtonElement>('curve-range-duplicate');
+    this.curveRangeCropButton = requireElement<HTMLButtonElement>('curve-range-crop');
+    this.curveLockValueInput = requireElement<HTMLInputElement>('curve-lock-value');
+    this.curveLockUseCurrentButton = requireElement<HTMLButtonElement>('curve-lock-use-current');
+    this.curveLockApplyButton = requireElement<HTMLButtonElement>('curve-lock-apply');
 
     this.sceneController = new SceneController(canvas);
     this.sceneController.setModelUpAxis('+Z');
@@ -1290,10 +1525,14 @@ export class AppController {
       console.log('Joint clicked:', jointName);
       // 滚动到对应的关节控制面板
       this.scrollToJointControl(jointName);
+      if (isUrdfMotionKind(this.currentMotionKind)) {
+        this.selectCurveChannel(`joint:${jointName}`);
+      }
     };
 
     this.urdfLoadService = new UrdfLoadService();
     this.csvMotionService = new CsvMotionService();
+    this.beyondMimicMotionService = new BeyondMimicMotionService();
     this.mimicKitMotionService = new MimicKitMotionService();
     this.gmrMotionService = new GmrMotionService();
     this.bvhMotionService = new BvhMotionService();
@@ -1302,10 +1541,38 @@ export class AppController {
     this.motionPlayer = new G1MotionPlayer();
     this.bvhMotionPlayer = new BvhMotionPlayer();
     this.smplMotionPlayer = new SmplMotionPlayer();
+    this.curveEditor = new MotionCurveEditor({
+      canvas: this.curveCanvas,
+      channelSelect: this.curveChannelSelect,
+      axisSelect: this.curveAxisSelect,
+      statusElement: this.curveStatus,
+      onChannelSelected: (channelId) => {
+        this.selectedCurveChannelId = channelId;
+        this.refreshCurveEditor();
+      },
+      onFrameSelected: (frameIndex) => {
+        this.seekActiveMotion(frameIndex);
+      },
+      onValueEdited: (channelId, frameIndex, value) => {
+        if (!isUrdfMotionKind(this.currentMotionKind)) {
+          return;
+        }
+        if (this.motionPlayer.setChannelValue(channelId, frameIndex, value)) {
+          this.sceneController.syncGroundToCurrentRobot();
+          this.sceneController.syncViewToCurrentRobot();
+          this.refreshCurveEditor();
+        }
+      },
+      onRangeSelected: (startFrame, endFrame) => {
+        this.setCurveFrameRange(startFrame, endFrame);
+      },
+    });
     this.motionPlayer.onFrameChanged = (snapshot) => {
       this.motionFrameSnapshot = snapshot;
       this.syncMotionControls();
       this.sceneController.syncViewToCurrentRobot();
+      this.updateStabilityCurrentFrame();
+      this.refreshCurveEditor();
     };
     this.motionPlayer.onPlaybackStateChanged = (isPlaying) => {
       this.isMotionPlaying = isPlaying;
@@ -1325,6 +1592,14 @@ export class AppController {
     };
     this.motionPlayer.onJointAnglesChanged = (jointNames, jointValues) => {
       this.updateJointPanelValues(jointNames, jointValues);
+    };
+    this.motionPlayer.onClipEditStarted = (mergeKey) => {
+      this.beginMotionHistoryEdit(mergeKey);
+    };
+    this.motionPlayer.onClipDataChanged = () => {
+      this.commitPendingMotionHistoryEdit();
+      this.recomputeStabilityIfEnabled();
+      this.refreshCurveEditor();
     };
     this.bvhMotionPlayer.onFrameChanged = (snapshot) => {
       this.motionFrameSnapshot = snapshot;
@@ -1392,26 +1667,52 @@ export class AppController {
     this.smplModelSelect.addEventListener('change', this.onSmplModelSelectChange);
     this.motionPlayButton.addEventListener('click', this.onMotionPlayClick);
     this.motionResetButton.addEventListener('click', this.onMotionResetClick);
+    this.undoMotionButton.addEventListener('click', this.onUndoMotionClick);
+    this.redoMotionButton.addEventListener('click', this.onRedoMotionClick);
     this.motionFpsInput.addEventListener('input', this.onMotionFpsInput);
     this.motionFpsInput.addEventListener('change', this.onMotionFpsChange);
     this.motionFrameSlider.addEventListener('input', this.onMotionFrameInput);
+    this.stabilityToggleButton.addEventListener('click', this.onStabilityToggleClick);
+    this.curveFrameSlider.addEventListener('input', this.onCurveFrameInput);
+    this.curveFrameInput.addEventListener('input', this.onCurveFrameNumberInput);
+    this.curveFrameInput.addEventListener('change', this.onCurveFrameNumberChange);
+    this.curveFrameInput.addEventListener('keydown', this.onCurveFrameNumberKeyDown);
+    this.curveFrameInput.addEventListener('blur', this.onCurveFrameInputBlur);
     this.exportMotionButton.addEventListener('click', this.onExportMotionClick);
     this.insertKeyframeButton.addEventListener('click', this.onInsertKeyframeClick);
     this.prevKeyframeButton.addEventListener('click', this.onPrevKeyframeClick);
     this.nextKeyframeButton.addEventListener('click', this.onNextKeyframeClick);
     this.motionFrameCountInput.addEventListener('change', this.onMotionFrameCountChange);
+    this.duplicateFrameButton.addEventListener('click', this.onDuplicateFrameClick);
+    this.prependRestPoseButton.addEventListener('click', this.onPrependRestPoseClick);
     this.jointPanelToggle.addEventListener('click', this.onJointPanelToggleClick);
+    this.curvePanelToggle.addEventListener('click', this.onCurvePanelToggleClick);
+    this.curveRangeStartInput.addEventListener('change', this.onCurveRangeInputChange);
+    this.curveRangeEndInput.addEventListener('change', this.onCurveRangeInputChange);
+    this.curveRangeClearButton.addEventListener('click', this.onCurveRangeClearClick);
+    this.curveRangeStartCurrentButton.addEventListener('click', this.onCurveRangeStartCurrentClick);
+    this.curveRangeEndCurrentButton.addEventListener('click', this.onCurveRangeEndCurrentClick);
+    this.curveRangeApplyButton.addEventListener('click', this.onCurveRangeApplyClick);
+    this.curveRangeSmoothButton.addEventListener('click', this.onCurveRangeSmoothClick);
+    this.curveRangeDuplicateButton.addEventListener('click', this.onCurveRangeDuplicateClick);
+    this.curveRangeCropButton.addEventListener('click', this.onCurveRangeCropClick);
+    this.curveLockUseCurrentButton.addEventListener('click', this.onCurveLockUseCurrentClick);
+    this.curveLockApplyButton.addEventListener('click', this.onCurveLockApplyClick);
     this.datasetPanelMinimizeBtn.addEventListener('click', this.onDatasetPanelMinimizeClick);
     this.statusPanelMinimizeBtn.addEventListener('click', this.onStatusPanelMinimizeClick);
 
     this.syncVisibilityButtons();
     this.syncMotionControls();
+    this.syncCurvePanelCollapsedState();
+    this.syncStatusPanelMinimizedState();
     this.syncPresetControls();
     this.syncObjControls();
     this.renderUrdfList();
     this.renderSmplModelList();
     this.renderState();
     void this.initializePresetManifest();
+    this.curveEditor.clear();
+    this.syncCurveLockControls(0, 0);
   }
 
   async handleDrop(dataTransfer: DataTransfer): Promise<void> {
@@ -1475,14 +1776,37 @@ export class AppController {
     this.smplModelSelect.removeEventListener('change', this.onSmplModelSelectChange);
     this.motionPlayButton.removeEventListener('click', this.onMotionPlayClick);
     this.motionResetButton.removeEventListener('click', this.onMotionResetClick);
+    this.undoMotionButton.removeEventListener('click', this.onUndoMotionClick);
+    this.redoMotionButton.removeEventListener('click', this.onRedoMotionClick);
     this.motionFpsInput.removeEventListener('input', this.onMotionFpsInput);
     this.motionFpsInput.removeEventListener('change', this.onMotionFpsChange);
     this.motionFrameSlider.removeEventListener('input', this.onMotionFrameInput);
+    this.stabilityToggleButton.removeEventListener('click', this.onStabilityToggleClick);
+    this.curveFrameSlider.removeEventListener('input', this.onCurveFrameInput);
+    this.curveFrameInput.removeEventListener('input', this.onCurveFrameNumberInput);
+    this.curveFrameInput.removeEventListener('change', this.onCurveFrameNumberChange);
+    this.curveFrameInput.removeEventListener('keydown', this.onCurveFrameNumberKeyDown);
+    this.curveFrameInput.removeEventListener('blur', this.onCurveFrameInputBlur);
+    this.duplicateFrameButton.removeEventListener('click', this.onDuplicateFrameClick);
+    this.prependRestPoseButton.removeEventListener('click', this.onPrependRestPoseClick);
+    this.curvePanelToggle.removeEventListener('click', this.onCurvePanelToggleClick);
+    this.curveRangeStartInput.removeEventListener('change', this.onCurveRangeInputChange);
+    this.curveRangeEndInput.removeEventListener('change', this.onCurveRangeInputChange);
+    this.curveRangeClearButton.removeEventListener('click', this.onCurveRangeClearClick);
+    this.curveRangeStartCurrentButton.removeEventListener('click', this.onCurveRangeStartCurrentClick);
+    this.curveRangeEndCurrentButton.removeEventListener('click', this.onCurveRangeEndCurrentClick);
+    this.curveRangeApplyButton.removeEventListener('click', this.onCurveRangeApplyClick);
+    this.curveRangeSmoothButton.removeEventListener('click', this.onCurveRangeSmoothClick);
+    this.curveRangeDuplicateButton.removeEventListener('click', this.onCurveRangeDuplicateClick);
+    this.curveRangeCropButton.removeEventListener('click', this.onCurveRangeCropClick);
+    this.curveLockUseCurrentButton.removeEventListener('click', this.onCurveLockUseCurrentClick);
+    this.curveLockApplyButton.removeEventListener('click', this.onCurveLockApplyClick);
 
     this.urdfLoadService.dispose();
     this.motionPlayer.dispose();
     this.bvhMotionPlayer.dispose();
     this.smplMotionPlayer.dispose();
+    this.curveEditor.dispose();
     this.sceneController.dispose();
   }
 
@@ -1532,6 +1856,12 @@ export class AppController {
     const bvhPaths = this.bvhMotionService.getAvailableBvhPaths(fileMap);
     if (bvhPaths.length > 0) {
       await this.loadBvhMotionFromDroppedFiles(fileMap);
+      return;
+    }
+
+    const beyondMimicNpzPaths = await this.beyondMimicMotionService.getAvailableNpzPaths(fileMap);
+    if (beyondMimicNpzPaths.length > 0) {
+      await this.loadBeyondMimicMotionFromDroppedFiles(fileMap);
       return;
     }
 
@@ -1598,6 +1928,7 @@ export class AppController {
         title: 'Motion Load Failed',
         detail: 'Failed to load any .pkl file as either MimicKit or GMR format.',
       });
+      return;
     }
 
     const smplScan = await this.smplMotionService.scanDroppedNpzFiles(fileMap);
@@ -1769,7 +2100,7 @@ export class AppController {
     this.bvhMotionPlayer.load(null, null);
     this.motionPlayer.attachRobot(loadedRobotResult.robot);
     const bindingReport = this.motionPlayer.loadClip(clip);
-    this.sceneController.syncGroundToCurrentRobot();
+    this.sceneController.anchorGroundToOrigin();
 
     this.currentMotionClip = clip;
     this.currentBvhMotion = null;
@@ -1777,6 +2108,10 @@ export class AppController {
     this.currentMotionKind = motionKind;
     this.currentMotionSourcePath = sourcePath;
     this.motionWarnings = [...warnings];
+    this.stabilityAnalyzer = new StabilityAnalyzer(loadedRobotResult.robot);
+    this.stabilityEvaluations = [];
+    this.stabilityRanges = [];
+    this.currentStabilityEvaluation = null;
     if (bindingReport.missingRootJoint) {
       this.motionWarnings.push(
         `Joint "${clip.schema.rootJointName}" was not found. Root translation/rotation is ignored.`,
@@ -1789,6 +2124,12 @@ export class AppController {
       fps: clip.fps,
       timeSeconds: 0,
     };
+    this.resetMotionHistory();
+    this.setCurveFrameRange(0, 0);
+    if (this.isStabilityOverlayEnabled) {
+      this.recomputeStabilityAnalysis();
+      this.updateStabilityCurrentFrame();
+    }
     this.playActiveMotion();
     this.syncMotionControls();
     this.recoverableDropHint = null;
@@ -1904,6 +2245,46 @@ export class AppController {
         loadedRobotResult,
         result.clip,
         'gmr',
+        result.selectedMotionPath,
+        result.warnings,
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.setState('error', {
+        title: 'Motion Load Failed',
+        detail: reason,
+      });
+    }
+  }
+
+  private async loadBeyondMimicMotionFromDroppedFiles(
+    fileMap: DroppedFileMap,
+    preferredMotionPath?: string,
+  ): Promise<void> {
+    const loadedRobotResult = this.lastLoadResult;
+    if (!loadedRobotResult) {
+      this.showRecoverableDropError(
+        'URDF Required For BeyondMimic',
+        'Load a URDF robot first, then drop BeyondMimic motion NPZ.',
+        'BeyondMimic motion-only drop needs an active URDF robot. Drop URDF first, then BeyondMimic NPZ.',
+      );
+      return;
+    }
+
+    this.setState('loading', {
+      detail: 'Loading BeyondMimic motion NPZ ...',
+    });
+
+    try {
+      const result = await this.beyondMimicMotionService.loadFromDroppedFiles(
+        fileMap,
+        loadedRobotResult.motionSchema,
+        preferredMotionPath,
+      );
+      this.applyLoadedUrdfMotion(
+        loadedRobotResult,
+        result.clip,
+        'beyondmimic',
         result.selectedMotionPath,
         result.warnings,
       );
@@ -2566,7 +2947,13 @@ export class AppController {
       return motionOption.bindingTags.includes(modelOption.bindingTag);
     }
 
-    if ((motionOption.kind !== 'csv' && motionOption.kind !== 'mimickit') || !modelOption.bindingTag) {
+    if (
+      (motionOption.kind !== 'csv' &&
+        motionOption.kind !== 'mimickit' &&
+        motionOption.kind !== 'gmr' &&
+        motionOption.kind !== 'beyondmimic') ||
+      !modelOption.bindingTag
+    ) {
       return false;
     }
 
@@ -2729,6 +3116,10 @@ export class AppController {
         await this.loadMotionFromDroppedFiles(motionFileMap, motionOption.selectedMotionPath);
       } else if (motionOption.kind === 'mimickit') {
         await this.loadMimicKitMotionFromDroppedFiles(motionFileMap, motionOption.selectedMotionPath);
+      } else if (motionOption.kind === 'gmr') {
+        await this.loadGmrMotionFromDroppedFiles(motionFileMap, motionOption.selectedMotionPath);
+      } else if (motionOption.kind === 'beyondmimic') {
+        await this.loadBeyondMimicMotionFromDroppedFiles(motionFileMap, motionOption.selectedMotionPath);
       } else if (motionOption.kind === 'bvh') {
         await this.loadBvhMotionFromDroppedFiles(motionFileMap, motionOption.selectedMotionPath);
       } else {
@@ -2977,6 +3368,11 @@ export class AppController {
     this.motionWarnings = [];
     this.motionFrameSnapshot = null;
     this.isMotionPlaying = false;
+    this.clearStabilityAnalysis();
+    this.resetMotionHistory();
+    this.selectedCurveChannelId = null;
+    this.selectedCurveRangeStartFrame = null;
+    this.selectedCurveRangeEndFrame = null;
     this.hideJointPanel();
     this.syncMotionControls();
     this.syncVisibilityButtons();
@@ -3159,9 +3555,9 @@ export class AppController {
 
   private syncDropOverlayDockState(): void {
     this.appRoot.dataset.dropOverlayDocked = this.isDropOverlayDocked ? 'true' : 'false';
-    const isCornerPosition = this.isDropOverlayDocked || this.viewerState === 'playing';
-    const label = isCornerPosition ? 'Restore panel to center' : 'Move panel to bottom left';
-    this.dropOverlayDockButton.textContent = isCornerPosition ? '□' : '−';
+    const isCollapsed = this.isDropOverlayDocked || this.viewerState === 'playing';
+    const label = isCollapsed ? 'Expand panel beside status' : 'Collapse panel beside status';
+    this.dropOverlayDockButton.textContent = isCollapsed ? '□' : '−';
     this.dropOverlayDockButton.ariaLabel = label;
     this.dropOverlayDockButton.title = label;
     this.dropOverlayDockButton.hidden = false;
@@ -3741,15 +4137,17 @@ export class AppController {
       return;
     }
 
-    const safeFps = Math.max(0.1, Number(nextFps.toFixed(3)));
-    this.currentMotionClip.fps = safeFps;
-    const currentFrame = this.motionFrameSnapshot?.frameIndex ?? 0;
-    this.motionPlayer.seek(currentFrame);
-    this.syncMotionControls();
+    this.runMotionHistoryEdit('motion_fps', () => {
+      const safeFps = Math.max(0.1, Number(nextFps.toFixed(3)));
+      this.currentMotionClip!.fps = safeFps;
+      const currentFrame = this.motionFrameSnapshot?.frameIndex ?? 0;
+      this.motionPlayer.seek(currentFrame);
+      this.syncMotionControls();
 
-    if (this.isModelActiveState()) {
-      this.renderCurrentReadyState();
-    }
+      if (this.isModelActiveState()) {
+        this.renderCurrentReadyState();
+      }
+    });
   }
 
   private applyBvhMotionFps(nextFps: number): void {
@@ -3790,6 +4188,18 @@ export class AppController {
     if (this.currentMotionKind === 'mimickit') {
       return this.currentMotionSourcePath
         ? this.formatAssetFileLabel(this.currentMotionSourcePath, 'motion.pkl')
+        : null;
+    }
+
+    if (this.currentMotionKind === 'gmr') {
+      return this.currentMotionSourcePath
+        ? this.formatAssetFileLabel(this.currentMotionSourcePath, 'motion.pkl')
+        : null;
+    }
+
+    if (this.currentMotionKind === 'beyondmimic') {
+      return this.currentMotionSourcePath
+        ? this.formatAssetFileLabel(this.currentMotionSourcePath, 'motion.npz')
         : null;
     }
 
@@ -3841,13 +4251,457 @@ export class AppController {
     this.viewModeButton.classList.toggle('active', isRootLock);
   }
 
+  private createMotionHistoryEntry(): MotionHistoryEntry | null {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip) {
+      return null;
+    }
+
+    const frameCount = this.currentMotionClip.frameCount;
+    if (frameCount <= 0) {
+      return null;
+    }
+    const currentFrame = this.motionHistoryFrameOverride ?? this.motionPlayer.getCurrentFrame();
+    return {
+      clip: G1MotionPlayer.cloneClip(this.currentMotionClip),
+      keyframes: Array.from(this.keyframes)
+        .filter((frame) => frame >= 0 && frame < frameCount)
+        .sort((a, b) => a - b),
+      currentFrame: Math.max(0, Math.min(frameCount - 1, currentFrame)),
+    };
+  }
+
+  private motionHistoryEntriesEqual(a: MotionHistoryEntry, b: MotionHistoryEntry): boolean {
+    if (
+      a.currentFrame !== b.currentFrame ||
+      a.clip.name !== b.clip.name ||
+      a.clip.sourcePath !== b.clip.sourcePath ||
+      a.clip.fps !== b.clip.fps ||
+      a.clip.frameCount !== b.clip.frameCount ||
+      a.clip.stride !== b.clip.stride ||
+      a.clip.csvMode !== b.clip.csvMode ||
+      a.clip.sourceColumnCount !== b.clip.sourceColumnCount ||
+      a.clip.schema.rootJointName !== b.clip.schema.rootJointName ||
+      a.clip.schema.rootComponentCount !== b.clip.schema.rootComponentCount
+    ) {
+      return false;
+    }
+
+    if (a.clip.schema.jointNames.length !== b.clip.schema.jointNames.length) {
+      return false;
+    }
+    for (let index = 0; index < a.clip.schema.jointNames.length; index += 1) {
+      if (a.clip.schema.jointNames[index] !== b.clip.schema.jointNames[index]) {
+        return false;
+      }
+    }
+
+    if (a.keyframes.length !== b.keyframes.length) {
+      return false;
+    }
+    for (let index = 0; index < a.keyframes.length; index += 1) {
+      if (a.keyframes[index] !== b.keyframes[index]) {
+        return false;
+      }
+    }
+
+    if (a.clip.data.length !== b.clip.data.length) {
+      return false;
+    }
+    for (let index = 0; index < a.clip.data.length; index += 1) {
+      if (a.clip.data[index] !== b.clip.data[index]) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private beginMotionHistoryEdit(mergeKey: string): void {
+    if (this.isRestoringMotionHistory || !isUrdfMotionKind(this.currentMotionKind)) {
+      return;
+    }
+
+    if (this.pendingMotionHistoryEntry) {
+      return;
+    }
+
+    this.pendingMotionHistoryEntry = this.createMotionHistoryEntry();
+    this.pendingMotionHistoryMergeKey = mergeKey;
+  }
+
+  private commitPendingMotionHistoryEdit(): void {
+    if (this.isRestoringMotionHistory || !this.pendingMotionHistoryEntry) {
+      return;
+    }
+
+    if (this.motionHistoryAutoCommitDepth > 0) {
+      return;
+    }
+
+    const afterEntry = this.createMotionHistoryEntry();
+    const beforeEntry = this.pendingMotionHistoryEntry;
+    const mergeKey = this.pendingMotionHistoryMergeKey;
+    this.pendingMotionHistoryEntry = null;
+    this.pendingMotionHistoryMergeKey = null;
+
+    if (!afterEntry || this.motionHistoryEntriesEqual(beforeEntry, afterEntry)) {
+      this.syncMotionHistoryButtons();
+      return;
+    }
+
+    const now = Date.now();
+    const shouldMerge =
+      mergeKey !== null &&
+      mergeKey === this.lastMotionHistoryMergeKey &&
+      now - this.lastMotionHistoryCommitAt <= MOTION_HISTORY_MERGE_WINDOW_MS &&
+      this.motionUndoStack.length > 0;
+
+    if (!shouldMerge) {
+      this.pushMotionUndoEntry(beforeEntry);
+    }
+
+    this.motionRedoStack = [];
+    this.lastMotionHistoryMergeKey = mergeKey;
+    this.lastMotionHistoryCommitAt = now;
+    this.syncMotionHistoryButtons();
+  }
+
+  private withMotionHistoryFrameOverride<T>(frameIndex: number, callback: () => T): T {
+    const previousOverride = this.motionHistoryFrameOverride;
+    this.motionHistoryFrameOverride = frameIndex;
+    try {
+      return callback();
+    } finally {
+      this.motionHistoryFrameOverride = previousOverride;
+    }
+  }
+
+  private runMotionHistoryEdit(mergeKey: string, edit: () => void): void {
+    if (!isUrdfMotionKind(this.currentMotionKind)) {
+      edit();
+      return;
+    }
+
+    this.motionHistoryAutoCommitDepth += 1;
+    this.beginMotionHistoryEdit(mergeKey);
+    try {
+      edit();
+    } finally {
+      this.motionHistoryAutoCommitDepth = Math.max(0, this.motionHistoryAutoCommitDepth - 1);
+      this.commitPendingMotionHistoryEdit();
+    }
+  }
+
+  private pushMotionUndoEntry(entry: MotionHistoryEntry): void {
+    this.motionUndoStack.push(entry);
+    if (this.motionUndoStack.length > MAX_MOTION_HISTORY_ENTRIES) {
+      this.motionUndoStack.splice(0, this.motionUndoStack.length - MAX_MOTION_HISTORY_ENTRIES);
+    }
+  }
+
+  private pushMotionRedoEntry(entry: MotionHistoryEntry): void {
+    this.motionRedoStack.push(entry);
+    if (this.motionRedoStack.length > MAX_MOTION_HISTORY_ENTRIES) {
+      this.motionRedoStack.splice(0, this.motionRedoStack.length - MAX_MOTION_HISTORY_ENTRIES);
+    }
+  }
+
+  private resetMotionHistory(): void {
+    this.motionUndoStack = [];
+    this.motionRedoStack = [];
+    this.pendingMotionHistoryEntry = null;
+    this.pendingMotionHistoryMergeKey = null;
+    this.lastMotionHistoryMergeKey = null;
+    this.lastMotionHistoryCommitAt = 0;
+    this.motionHistoryFrameOverride = null;
+    this.motionHistoryAutoCommitDepth = 0;
+    this.syncMotionHistoryButtons();
+  }
+
+  private restoreMotionHistoryEntry(entry: MotionHistoryEntry): void {
+    if (!this.lastLoadResult) {
+      return;
+    }
+
+    const frameCount = entry.clip.frameCount;
+    if (frameCount <= 0) {
+      return;
+    }
+    const restoredClip: MotionClip = {
+      name: entry.clip.name,
+      sourcePath: entry.clip.sourcePath,
+      fps: entry.clip.fps,
+      frameCount,
+      stride: entry.clip.stride,
+      schema: {
+        rootJointName: entry.clip.schema.rootJointName,
+        rootComponentCount: entry.clip.schema.rootComponentCount,
+        jointNames: [...entry.clip.schema.jointNames],
+      },
+      csvMode: entry.clip.csvMode,
+      sourceColumnCount: entry.clip.sourceColumnCount,
+      data: new Float32Array(entry.clip.data),
+      beyondMimicSource: entry.clip.beyondMimicSource,
+    };
+
+    this.isRestoringMotionHistory = true;
+    try {
+      this.currentMotionClip = restoredClip;
+      this.motionPlayer.attachRobot(this.lastLoadResult.robot);
+      this.motionPlayer.loadClip(restoredClip, entry.currentFrame);
+      this.keyframes = new Set(
+        entry.keyframes.filter((frame) => frame >= 0 && frame < frameCount),
+      );
+      const targetFrame = Math.max(0, Math.min(frameCount - 1, entry.currentFrame));
+      this.motionFrameSnapshot = {
+        frameIndex: targetFrame,
+        frameCount,
+        fps: restoredClip.fps,
+        timeSeconds: restoredClip.fps > 0 ? targetFrame / restoredClip.fps : 0,
+      };
+      if (this.selectedCurveRangeStartFrame !== null || this.selectedCurveRangeEndFrame !== null) {
+        this.setCurveFrameRange(
+          this.selectedCurveRangeStartFrame,
+          this.selectedCurveRangeEndFrame,
+        );
+      }
+      this.updateKeyframeMarkers();
+      this.syncMotionControls();
+      this.syncMotionWarningList();
+      this.sceneController.anchorGroundToOrigin();
+      this.sceneController.syncViewToCurrentRobot();
+      this.recomputeStabilityIfEnabled();
+      this.refreshCurveEditor();
+    } finally {
+      this.isRestoringMotionHistory = false;
+    }
+  }
+
+  private undoMotionEdit(): void {
+    if (!isUrdfMotionKind(this.currentMotionKind) || this.motionUndoStack.length === 0) {
+      return;
+    }
+
+    const currentEntry = this.createMotionHistoryEntry();
+    const previousEntry = this.motionUndoStack.pop();
+    if (!currentEntry || !previousEntry) {
+      this.syncMotionHistoryButtons();
+      return;
+    }
+
+    this.pushMotionRedoEntry(currentEntry);
+    this.restoreMotionHistoryEntry(previousEntry);
+    this.lastMotionHistoryMergeKey = null;
+    this.lastMotionHistoryCommitAt = 0;
+    this.syncMotionHistoryButtons();
+  }
+
+  private redoMotionEdit(): void {
+    if (!isUrdfMotionKind(this.currentMotionKind) || this.motionRedoStack.length === 0) {
+      return;
+    }
+
+    const currentEntry = this.createMotionHistoryEntry();
+    const nextEntry = this.motionRedoStack.pop();
+    if (!currentEntry || !nextEntry) {
+      this.syncMotionHistoryButtons();
+      return;
+    }
+
+    this.pushMotionUndoEntry(currentEntry);
+    this.restoreMotionHistoryEntry(nextEntry);
+    this.lastMotionHistoryMergeKey = null;
+    this.lastMotionHistoryCommitAt = 0;
+    this.syncMotionHistoryButtons();
+  }
+
+  private syncMotionHistoryButtons(): void {
+    const canUseHistory = isUrdfMotionKind(this.currentMotionKind) && Boolean(this.currentMotionClip);
+    this.undoMotionButton.disabled = !canUseHistory || this.motionUndoStack.length === 0;
+    this.redoMotionButton.disabled = !canUseHistory || this.motionRedoStack.length === 0;
+  }
+
+  private ensureStabilityAnalyzer(): StabilityAnalyzer | null {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.lastLoadResult || !this.currentMotionClip) {
+      return null;
+    }
+
+    if (!this.stabilityAnalyzer) {
+      this.stabilityAnalyzer = new StabilityAnalyzer(this.lastLoadResult.robot);
+    }
+    return this.stabilityAnalyzer;
+  }
+
+  private clearStabilityAnalysis(): void {
+    this.stabilityAnalyzer = null;
+    this.isStabilityOverlayEnabled = false;
+    this.stabilityEvaluations = [];
+    this.stabilityRanges = [];
+    this.currentStabilityEvaluation = null;
+    this.sceneController.clearStabilityOverlay();
+    this.renderStabilitySummary();
+  }
+
+  private recomputeStabilityIfEnabled(): void {
+    if (!this.isStabilityOverlayEnabled) {
+      return;
+    }
+    this.recomputeStabilityAnalysis();
+    this.updateStabilityCurrentFrame();
+  }
+
+  private recomputeStabilityAnalysis(): void {
+    const analyzer = this.ensureStabilityAnalyzer();
+    if (!analyzer || !this.currentMotionClip) {
+      this.stabilityEvaluations = [];
+      this.stabilityRanges = [];
+      this.currentStabilityEvaluation = null;
+      this.renderStabilitySummary();
+      return;
+    }
+
+    const frameCount = this.currentMotionClip.frameCount;
+    const groundY = this.sceneController.getCurrentGroundY();
+    const evaluations: StabilityEvaluation[] = [];
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      const evaluation = this.motionPlayer.withFrameAppliedSilently(frameIndex, () =>
+        analyzer.evaluateCurrentFrame(frameIndex, groundY),
+      );
+      if (evaluation) {
+        evaluations.push(evaluation);
+      }
+    }
+
+    this.stabilityEvaluations = evaluations;
+    this.stabilityRanges = buildStabilityFrameRanges(evaluations);
+    this.renderStabilitySummary();
+  }
+
+  private updateStabilityCurrentFrame(): void {
+    if (!this.isStabilityOverlayEnabled) {
+      this.currentStabilityEvaluation = null;
+      this.sceneController.clearStabilityOverlay();
+      this.syncStabilityPanel();
+      return;
+    }
+
+    const analyzer = this.ensureStabilityAnalyzer();
+    if (!analyzer) {
+      this.currentStabilityEvaluation = null;
+      this.sceneController.clearStabilityOverlay();
+      this.syncStabilityPanel();
+      return;
+    }
+
+    const frameIndex = this.motionFrameSnapshot?.frameIndex ?? this.motionPlayer.getCurrentFrame();
+    const evaluation = analyzer.evaluateCurrentFrame(frameIndex, this.sceneController.getCurrentGroundY());
+    this.currentStabilityEvaluation = evaluation;
+    this.sceneController.setStabilityOverlay({
+      visible: true,
+      stable: evaluation.isStable,
+      centerOfMass: evaluation.centerOfMass,
+      centerOfMassProjection: evaluation.centerOfMassProjection,
+      supportPolygon: evaluation.supportPolygon,
+    });
+    this.syncStabilityPanel();
+  }
+
+  private formatStabilityState(state: StabilityEvaluation['state']): string {
+    if (state === 'inside') {
+      return 'Inside';
+    }
+    if (state === 'outside') {
+      return 'Outside';
+    }
+    if (state === 'no_support') {
+      return 'No support';
+    }
+    return 'No mass';
+  }
+
+  private syncStabilityPanel(): void {
+    const canUseStability =
+      isUrdfMotionKind(this.currentMotionKind) && Boolean(this.currentMotionClip && this.lastLoadResult);
+    this.stabilityPanel.hidden = !canUseStability;
+    this.stabilityToggleButton.disabled = !canUseStability;
+    this.stabilityToggleButton.classList.toggle('active', this.isStabilityOverlayEnabled);
+    this.stabilityToggleButton.textContent = this.isStabilityOverlayEnabled
+      ? 'Quasi-static COM Support: On'
+      : 'Quasi-static COM Support';
+
+    if (!canUseStability || !this.isStabilityOverlayEnabled) {
+      this.stabilityCurrent.textContent = 'Off';
+      delete this.stabilityCurrent.dataset.state;
+      this.stabilityTimeline.replaceChildren();
+      this.stabilityRangesList.replaceChildren();
+      return;
+    }
+
+    const evaluation = this.currentStabilityEvaluation;
+    if (!evaluation) {
+      this.stabilityCurrent.textContent = 'No frame';
+      delete this.stabilityCurrent.dataset.state;
+      return;
+    }
+
+    const marginText =
+      typeof evaluation.margin === 'number'
+        ? ` · ${evaluation.margin >= 0 ? '+' : ''}${evaluation.margin.toFixed(3)} m`
+        : '';
+    this.stabilityCurrent.textContent =
+      `Frame ${evaluation.frameIndex + 1}: ${this.formatStabilityState(evaluation.state)}${marginText}`;
+    this.stabilityCurrent.dataset.state = evaluation.state;
+  }
+
+  private renderStabilitySummary(): void {
+    this.stabilityTimeline.replaceChildren();
+    this.stabilityRangesList.replaceChildren();
+
+    const frameCount = this.currentMotionClip?.frameCount ?? 0;
+    if (!this.isStabilityOverlayEnabled || frameCount <= 0 || this.stabilityRanges.length === 0) {
+      return;
+    }
+
+    for (const range of this.stabilityRanges) {
+      const segment = document.createElement('span');
+      segment.className = `stability-timeline__segment${
+        range.isStable ? '' : ' stability-timeline__segment--unstable'
+      }`;
+      segment.style.flexGrow = String(Math.max(range.endFrame - range.startFrame + 1, 1));
+      segment.title =
+        `${range.startFrame + 1}-${range.endFrame + 1}: ${this.formatStabilityState(range.state)}`;
+      this.stabilityTimeline.appendChild(segment);
+
+      const item = document.createElement('li');
+      item.className = `stability-ranges__item${range.isStable ? '' : ' stability-ranges__item--unstable'}`;
+
+      const label = document.createElement('span');
+      label.className = 'stability-ranges__label';
+      label.textContent = `Frames ${range.startFrame + 1}-${range.endFrame + 1}`;
+
+      const state = document.createElement('span');
+      state.className = 'stability-ranges__state';
+      state.textContent = this.formatStabilityState(range.state);
+
+      item.append(label, state);
+      this.stabilityRangesList.appendChild(item);
+    }
+  }
+
   private syncMotionControls(): void {
     const hasMotion = this.hasAnyMotion();
+    const canEditUrdfMotion = isUrdfMotionKind(this.currentMotionKind) && Boolean(this.currentMotionClip);
+    this.syncStabilityPanel();
     this.motionControlsSection.hidden = !hasMotion;
     this.motionPlayButton.disabled = !hasMotion;
     this.motionResetButton.disabled = !hasMotion;
     this.insertKeyframeButton.disabled = !hasMotion;
     this.motionFrameCountInput.disabled = !hasMotion;
+    this.duplicateFrameCountInput.disabled = !canEditUrdfMotion;
+    this.duplicateFrameButton.disabled = !canEditUrdfMotion;
+    this.restPoseHoldFramesInput.disabled = !canEditUrdfMotion;
+    this.restPoseBlendFramesInput.disabled = !canEditUrdfMotion;
+    this.prependRestPoseButton.disabled = !canEditUrdfMotion;
 
     if (!hasMotion) {
       this.motionTitle.textContent = 'Motion';
@@ -3858,9 +4712,14 @@ export class AppController {
       this.motionFrameSlider.value = '0';
       this.motionFrameLabel.textContent = 'Frame 0 / 0';
       this.motionFrameCountInput.value = '100';
+      this.duplicateFrameCountInput.value = '10';
+      this.restPoseHoldFramesInput.value = '10';
+      this.restPoseBlendFramesInput.value = '15';
       this.keyframes.clear();
       this.syncMotionFpsInput();
       this.syncMotionWarningList();
+      this.syncMotionHistoryButtons();
+      this.syncStabilityPanel();
       return;
     }
 
@@ -3896,6 +4755,8 @@ export class AppController {
     this.updateKeyframeMarkers();
     this.syncMotionFpsInput();
     this.syncMotionWarningList();
+    this.syncMotionHistoryButtons();
+    this.syncStabilityPanel();
   }
 
   private toggleViewMode(): void {
@@ -4302,7 +5163,27 @@ export class AppController {
           ) {
             throw new Error(`Failed to load MimicKit motion for preset "${preset.label}".`);
           }
-        } else {
+        } else if (preset.motion.kind === 'gmr') {
+          await this.loadGmrMotionFromDroppedFiles(motionFileMap, preferredMotionPath);
+
+          if (
+            this.currentMotionKind !== 'gmr' ||
+            !this.currentMotionSourcePath ||
+            !motionFileMap.has(this.currentMotionSourcePath)
+          ) {
+            throw new Error(`Failed to load GMR motion for preset "${preset.label}".`);
+          }
+        } else if (preset.motion.kind === 'beyondmimic') {
+          await this.loadBeyondMimicMotionFromDroppedFiles(motionFileMap, preferredMotionPath);
+
+          if (
+            this.currentMotionKind !== 'beyondmimic' ||
+            !this.currentMotionSourcePath ||
+            !motionFileMap.has(this.currentMotionSourcePath)
+          ) {
+            throw new Error(`Failed to load BeyondMimic motion for preset "${preset.label}".`);
+          }
+        } else if (preset.motion.kind === 'bvh') {
           await this.loadBvhMotionFromDroppedFiles(motionFileMap, preferredMotionPath);
 
           if (
@@ -4312,6 +5193,8 @@ export class AppController {
           ) {
             throw new Error(`Failed to load BVH motion for preset "${preset.label}".`);
           }
+        } else {
+          throw new Error(`Preset "${preset.label}" cannot load SMPL motion without an SMPL model.`);
         }
       }
     } catch (error) {
@@ -4397,14 +5280,25 @@ export class AppController {
     this.jointPanelToggle.textContent = this.isJointPanelCollapsed ? '+' : '−';
   }
 
+  private syncCurvePanelCollapsedState(): void {
+    this.curvePanel.dataset.collapsed = this.isCurvePanelCollapsed ? 'true' : 'false';
+    this.curvePanelToggle.textContent = this.isCurvePanelCollapsed ? '+' : '−';
+    if (!this.isCurvePanelCollapsed && !this.curvePanel.hidden) {
+      this.curveEditor.resize();
+    }
+  }
+
   private readonly onInsertKeyframeClick = (): void => {
     const currentFrame = this.motionPlayer.getCurrentFrame();
-    if (this.keyframes.has(currentFrame)) {
-      this.keyframes.delete(currentFrame);
-    } else {
-      this.keyframes.add(currentFrame);
-    }
-    this.updateKeyframeMarkers();
+    this.runMotionHistoryEdit(`keyframes:${currentFrame}`, () => {
+      if (this.keyframes.has(currentFrame)) {
+        this.keyframes.delete(currentFrame);
+      } else {
+        this.keyframes.add(currentFrame);
+      }
+      this.updateKeyframeMarkers();
+      this.syncMotionControls();
+    });
   };
 
   private readonly onPrevKeyframeClick = (): void => {
@@ -4465,10 +5359,283 @@ export class AppController {
     const newFrameCount = parseInt(this.motionFrameCountInput.value, 10);
     if (!isNaN(newFrameCount) && newFrameCount >= 2) {
       const insertPosition = this.frameInsertPositionSelect.value as 'start' | 'end';
-      this.motionPlayer.setFrameCount(newFrameCount, insertPosition);
+      const previousFrameCount = this.currentMotionClip?.frameCount ?? this.motionPlayer.getFrameCount();
+      this.runMotionHistoryEdit(`frame_count:${insertPosition}`, () => {
+        this.motionPlayer.setFrameCount(newFrameCount, insertPosition);
+        const insertedFrameCount = Math.max(0, newFrameCount - previousFrameCount);
+        this.keyframes = new Set(
+          Array.from(this.keyframes)
+            .map((frame) =>
+              insertPosition === 'start' && insertedFrameCount > 0
+                ? frame + insertedFrameCount
+                : frame,
+            )
+            .filter((frame) => frame >= 0 && frame < this.motionPlayer.getFrameCount()),
+        );
+        this.syncMotionControls();
+        this.updateKeyframeMarkers();
+        this.refreshCurveEditor();
+      });
+    }
+  };
+
+  private shiftKeyframesForInsertedFrames(insertionFrame: number, insertedFrameCount: number): void {
+    if (insertedFrameCount <= 0) {
+      return;
+    }
+
+    const frameCount = this.motionPlayer.getFrameCount();
+    this.keyframes = new Set(
+      Array.from(this.keyframes)
+        .map((frame) => (frame >= insertionFrame ? frame + insertedFrameCount : frame))
+        .filter((frame) => frame >= 0 && frame < frameCount),
+    );
+  }
+
+  private duplicateKeyframesForInsertedRange(
+    startFrame: number,
+    endFrame: number,
+    copyCount: number,
+  ): void {
+    const rangeFrameCount = Math.max(0, endFrame - startFrame + 1);
+    const insertedFrameCount = rangeFrameCount * copyCount;
+    if (rangeFrameCount <= 0 || insertedFrameCount <= 0) {
+      return;
+    }
+
+    const insertionFrame = endFrame + 1;
+    const frameCount = this.motionPlayer.getFrameCount();
+    const nextKeyframes = new Set<number>();
+    for (const frame of this.keyframes) {
+      if (frame >= insertionFrame) {
+        nextKeyframes.add(frame + insertedFrameCount);
+      } else {
+        nextKeyframes.add(frame);
+      }
+
+      if (frame >= startFrame && frame <= endFrame) {
+        const offsetInRange = frame - startFrame;
+        for (let copyIndex = 0; copyIndex < copyCount; copyIndex += 1) {
+          nextKeyframes.add(insertionFrame + copyIndex * rangeFrameCount + offsetInRange);
+        }
+      }
+    }
+
+    this.keyframes = new Set(
+      Array.from(nextKeyframes).filter((frame) => frame >= 0 && frame < frameCount),
+    );
+  }
+
+  private cropKeyframesToRange(startFrame: number, endFrame: number): void {
+    const frameCount = this.motionPlayer.getFrameCount();
+    this.keyframes = new Set(
+      Array.from(this.keyframes)
+        .filter((frame) => frame >= startFrame && frame <= endFrame)
+        .map((frame) => frame - startFrame)
+        .filter((frame) => frame >= 0 && frame < frameCount),
+    );
+  }
+
+  private shiftCurveRangeForInsertedFrames(insertionFrame: number, insertedFrameCount: number): void {
+    if (
+      insertedFrameCount <= 0 ||
+      this.selectedCurveRangeStartFrame === null ||
+      this.selectedCurveRangeEndFrame === null
+    ) {
+      return;
+    }
+
+    const nextStart =
+      this.selectedCurveRangeStartFrame >= insertionFrame
+        ? this.selectedCurveRangeStartFrame + insertedFrameCount
+        : this.selectedCurveRangeStartFrame;
+    const nextEnd =
+      this.selectedCurveRangeEndFrame >= insertionFrame
+        ? this.selectedCurveRangeEndFrame + insertedFrameCount
+        : this.selectedCurveRangeEndFrame;
+    this.setCurveFrameRange(nextStart, nextEnd);
+  }
+
+  private appendMotionWarning(warning: string): void {
+    if (!this.motionWarnings.includes(warning)) {
+      this.motionWarnings.push(warning);
+    }
+  }
+
+  private formatRestPoseDeltaWarning(report: RestPosePrependReport): string | null {
+    if (report.maxJointDelta < 1.2 && report.averageJointDelta < 0.45) {
+      return null;
+    }
+
+    return (
+      `Zero-pose prepend warning: original first frame is far from zero pose ` +
+      `(max joint delta ${report.maxJointDelta.toFixed(2)} rad, average ${report.averageJointDelta.toFixed(2)} rad). ` +
+      `For violent starts, copying the first frame may be safer.`
+    );
+  }
+
+  private readonly onDuplicateFrameClick = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip) {
+      return;
+    }
+
+    const rawCount = Number(this.duplicateFrameCountInput.value);
+    if (!Number.isFinite(rawCount)) {
+      return;
+    }
+
+    const duplicateCount = Math.max(
+      1,
+      Math.min(1000, Math.floor(rawCount)),
+    );
+    this.duplicateFrameCountInput.value = String(duplicateCount);
+
+    const sourceFrame = this.motionPlayer.getCurrentFrame();
+    const insertionFrame = sourceFrame + 1;
+    this.runMotionHistoryEdit(`duplicate_frame:${sourceFrame}:${duplicateCount}`, () => {
+      const didDuplicate = this.motionPlayer.duplicateFrame(sourceFrame, duplicateCount, 'after');
+      if (!didDuplicate) {
+        return;
+      }
+
+      this.shiftKeyframesForInsertedFrames(insertionFrame, duplicateCount);
+      this.shiftCurveRangeForInsertedFrames(insertionFrame, duplicateCount);
       this.syncMotionControls();
       this.updateKeyframeMarkers();
+      this.refreshCurveEditor();
+      this.sceneController.syncGroundToCurrentRobot();
+      this.sceneController.syncViewToCurrentRobot();
+      if (this.isModelActiveState()) {
+        this.renderCurrentReadyState();
+      }
+    });
+  };
+
+  private readonly onPrependRestPoseClick = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip) {
+      return;
     }
+
+    const rawHoldFrames = Number(this.restPoseHoldFramesInput.value);
+    const rawBlendFrames = Number(this.restPoseBlendFramesInput.value);
+    if (!Number.isFinite(rawHoldFrames) || !Number.isFinite(rawBlendFrames)) {
+      return;
+    }
+
+    const holdFrames = Math.max(0, Math.min(1000, Math.floor(rawHoldFrames)));
+    const blendFrames = Math.max(0, Math.min(1000, Math.floor(rawBlendFrames)));
+    if (holdFrames + blendFrames <= 0) {
+      return;
+    }
+
+    this.restPoseHoldFramesInput.value = String(holdFrames);
+    this.restPoseBlendFramesInput.value = String(blendFrames);
+
+    this.runMotionHistoryEdit(`prepend_zero_pose:${holdFrames}:${blendFrames}`, () => {
+      const report = this.motionPlayer.prependZeroPose(holdFrames, blendFrames);
+      if (!report) {
+        return;
+      }
+
+      this.shiftKeyframesForInsertedFrames(0, report.insertedFrameCount);
+      this.shiftCurveRangeForInsertedFrames(0, report.insertedFrameCount);
+      const warning = this.formatRestPoseDeltaWarning(report);
+      if (warning) {
+        this.appendMotionWarning(warning);
+      }
+      this.syncMotionControls();
+      this.updateKeyframeMarkers();
+      this.refreshCurveEditor();
+      this.sceneController.syncGroundToCurrentRobot();
+      this.sceneController.syncViewToCurrentRobot();
+      if (this.isModelActiveState()) {
+        this.renderCurrentReadyState();
+      }
+    });
+  };
+
+  private readonly onCurveRangeDuplicateClick = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip) {
+      return;
+    }
+
+    const selectedRange = this.getSelectedCurveFrameRange();
+    if (!selectedRange) {
+      return;
+    }
+
+    const rawCopyCount = Number(this.curveRangeCopyCountInput.value);
+    if (!Number.isFinite(rawCopyCount)) {
+      return;
+    }
+
+    const copyCount = Math.max(1, Math.min(1000, Math.floor(rawCopyCount)));
+    this.curveRangeCopyCountInput.value = String(copyCount);
+    const rangeFrameCount = selectedRange.end - selectedRange.start + 1;
+    const insertedFrameCount = rangeFrameCount * copyCount;
+    const insertionFrame = selectedRange.end + 1;
+
+    this.runMotionHistoryEdit(
+      `duplicate_range:${selectedRange.start}:${selectedRange.end}:${copyCount}`,
+      () => {
+        const didDuplicate = this.motionPlayer.duplicateFrameRange(
+          selectedRange.start,
+          selectedRange.end,
+          copyCount,
+          'after',
+        );
+        if (!didDuplicate) {
+          return;
+        }
+
+        this.duplicateKeyframesForInsertedRange(selectedRange.start, selectedRange.end, copyCount);
+        this.shiftCurveRangeForInsertedFrames(insertionFrame, insertedFrameCount);
+        this.syncMotionControls();
+        this.updateKeyframeMarkers();
+        this.refreshCurveEditor();
+        this.sceneController.syncGroundToCurrentRobot();
+        this.sceneController.syncViewToCurrentRobot();
+        if (this.isModelActiveState()) {
+          this.renderCurrentReadyState();
+        }
+      },
+    );
+  };
+
+  private readonly onCurveRangeCropClick = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip) {
+      return;
+    }
+
+    const selectedRange = this.getSelectedCurveFrameRange();
+    if (!selectedRange) {
+      return;
+    }
+
+    const croppedFrameCount = selectedRange.end - selectedRange.start + 1;
+    this.runMotionHistoryEdit(
+      `crop_range:${selectedRange.start}:${selectedRange.end}`,
+      () => {
+        const didCrop = this.motionPlayer.cropFrameRange(
+          selectedRange.start,
+          selectedRange.end,
+        );
+        if (!didCrop) {
+          return;
+        }
+
+        this.cropKeyframesToRange(selectedRange.start, selectedRange.end);
+        this.setCurveFrameRange(0, Math.max(0, croppedFrameCount - 1));
+        this.syncMotionControls();
+        this.updateKeyframeMarkers();
+        this.refreshCurveEditor();
+        this.sceneController.syncGroundToCurrentRobot();
+        this.sceneController.syncViewToCurrentRobot();
+        if (this.isModelActiveState()) {
+          this.renderCurrentReadyState();
+        }
+      },
+    );
   };
 
   private updateKeyframeMarkers(): void {
@@ -4534,76 +5701,14 @@ export class AppController {
     this.exportMotionClip(clip);
   };
 
-  private getRobotHeight(): number {
-    console.log('getRobotHeight called');
-    if (!this.lastLoadResult?.robot) {
-      console.log('No robot found in lastLoadResult');
-      return 0;
-    }
-
-    try {
-      // 计算机器人边界框
-      const robot = this.lastLoadResult.robot;
-      console.log('Robot found:', robot);
-      
-      const box = this.sceneController['computeRobotBounds'](robot);
-      if (!box) {
-        console.log('No bounding box found');
-        return 0;
-      }
-
-      console.log('Bounding box min:', box.min);
-      console.log('Bounding box max:', box.max);
-      
-      // 获取地面位置（机器人最低点）
-      const groundPosition = box.min.y;
-      console.log('Ground position (box.min.y):', groundPosition);
-      
-      // 计算root关节的位置
-      // 首先尝试从robot对象中获取root关节
-      const robotAny = robot as any;
-      let rootYPosition = 0;
-      
-      // 尝试不同的方式获取root关节位置
-      if (robotAny.joints && robotAny.joints['floating_base_joint']) {
-        const rootJoint = robotAny.joints['floating_base_joint'];
-        if (rootJoint.position) {
-          rootYPosition = rootJoint.position.y;
-          console.log('Root joint position from joints.floating_base_joint:', rootYPosition);
-        }
-      } else if (robotAny.position) {
-        rootYPosition = robotAny.position.y;
-        console.log('Root joint position from robot.position:', rootYPosition);
-      } else {
-        // 如果无法获取root位置，使用边界框中心
-        // 创建一个临时对象来存储中心位置
-        const center = { y: 0 };
-        // 模拟getCenter方法的行为
-        center.y = (box.min.y + box.max.y) / 2;
-        rootYPosition = center.y;
-        console.log('Root joint position from bounding box center:', rootYPosition);
-      }
-      
-      // 计算root关节到地面的高度
-      const rootHeight = rootYPosition - groundPosition;
-      console.log('Calculated root height:', rootHeight);
-      
-      return rootHeight;
-    } catch (error) {
-      console.error('Error calculating robot height:', error);
-      return 0;
-    }
-  }
-
   private exportMotionClip(clip: any): void {
-    let content: string;
+    let content: string | Uint8Array;
     let fileName: string;
     let mimeType: string;
 
     if (this.currentMotionKind === 'csv') {
       console.log('Generating CSV content');
-      const robotHeight = this.getRobotHeight();
-      const csvContent = this.csvMotionService.toCsv(clip, robotHeight);
+      const csvContent = this.csvMotionService.toCsv(clip);
       console.log('CSV content generated, length:', csvContent.length);
       content = csvContent;
       fileName = 'modified_motion.csv';
@@ -4622,13 +5727,22 @@ export class AppController {
       content = pklContent;
       fileName = 'modified_motion.pkl';
       mimeType = 'application/octet-stream';
+    } else if (this.currentMotionKind === 'beyondmimic') {
+      console.log('Generating BeyondMimic NPZ content');
+      const npzContent = this.beyondMimicMotionService.toNpz(clip);
+      console.log('NPZ content generated, length:', npzContent.length);
+      content = npzContent;
+      fileName = 'modified_motion.npz';
+      mimeType = 'application/octet-stream';
     } else {
       console.log('Not a supported motion type for export');
       return;
     }
 
     try {
-      const blob = new Blob([content], { type: mimeType });
+      const blobPart: BlobPart =
+        typeof content === 'string' ? content : new Uint8Array(content);
+      const blob = new Blob([blobPart], { type: mimeType });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -4677,6 +5791,61 @@ export class AppController {
     }
   }
 
+  private syncAfterJointControlEdit(
+    channelId: string,
+    options: {
+      affectsRoot?: boolean;
+    } = {},
+  ): void {
+    this.selectedCurveChannelId = channelId;
+    this.showCurvePanel();
+    if (options.affectsRoot) {
+      // Keep the floor anchored; root Z should move the robot relative to a fixed ground plane.
+      this.sceneController.syncGroundToCurrentRobot();
+    }
+    this.sceneController.syncViewToCurrentRobot();
+    this.refreshCurveEditor();
+  }
+
+  private applyJointControlChannelValue(channelId: string, value: number): boolean {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !Number.isFinite(value)) {
+      return false;
+    }
+
+    const currentFrame = this.motionPlayer.getCurrentFrame();
+    const selectedRange = this.getSelectedCurveFrameRange();
+    if (selectedRange) {
+      const channelValues = this.motionPlayer.getChannelValues(channelId);
+      if (channelValues.length === 0) {
+        return false;
+      }
+
+      const referenceFrame = Math.max(
+        0,
+        Math.min(channelValues.length - 1, currentFrame),
+      );
+      const currentValue = channelValues[referenceFrame];
+      if (!Number.isFinite(currentValue)) {
+        return false;
+      }
+
+      const delta = value - currentValue;
+      if (Math.abs(delta) <= 1e-9) {
+        return false;
+      }
+
+      return this.motionPlayer.offsetChannelRange(
+        channelId,
+        selectedRange.start,
+        selectedRange.end,
+        delta,
+        0,
+      );
+    }
+
+    return this.motionPlayer.setChannelValue(channelId, currentFrame, value);
+  }
+
   private renderJointPanel(jointNames: string[], jointValues: number[]): void {
     this.jointList.innerHTML = '';
 
@@ -4703,7 +5872,10 @@ export class AppController {
         const value = parseFloat(target.value);
         if (!isNaN(value)) {
           this.sceneController.highlightJoint(jointName);
-          this.motionPlayer.setJointValue(jointName, value);
+          const channelId = `joint:${jointName}`;
+          if (this.applyJointControlChannelValue(channelId, value)) {
+            this.syncAfterJointControlEdit(channelId);
+          }
         }
       });
 
@@ -4725,7 +5897,10 @@ export class AppController {
         const value = parseFloat(target.value);
         if (!isNaN(value)) {
           this.sceneController.highlightJoint(jointName);
-          this.motionPlayer.setJointValue(jointName, value);
+          const channelId = `joint:${jointName}`;
+          if (this.applyJointControlChannelValue(channelId, value)) {
+            this.syncAfterJointControlEdit(channelId);
+          }
         }
       });
 
@@ -4892,10 +6067,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentPos = this.motionPlayer.getRootPosition();
-        this.motionPlayer.setRootPosition(value, currentPos.y, currentPos.z);
-        const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="position"][data-axis="x"]');
-        if (slider) slider.value = value.toString();
+        const channelId = 'root_position:x';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="position"][data-axis="x"]');
+          if (slider) slider.value = value.toString();
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -4915,10 +6092,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentPos = this.motionPlayer.getRootPosition();
-        this.motionPlayer.setRootPosition(value, currentPos.y, currentPos.z);
-        const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="position"][data-axis="x"]');
-        if (input) input.value = value.toFixed(4);
+        const channelId = 'root_position:x';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="position"][data-axis="x"]');
+          if (input) input.value = value.toFixed(4);
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5051,10 +6230,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentPos = this.motionPlayer.getRootPosition();
-        this.motionPlayer.setRootPosition(currentPos.x, value, currentPos.z);
-        const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="position"][data-axis="y"]');
-        if (slider) slider.value = value.toString();
+        const channelId = 'root_position:y';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="position"][data-axis="y"]');
+          if (slider) slider.value = value.toString();
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5074,10 +6255,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentPos = this.motionPlayer.getRootPosition();
-        this.motionPlayer.setRootPosition(currentPos.x, value, currentPos.z);
-        const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="position"][data-axis="y"]');
-        if (input) input.value = value.toFixed(4);
+        const channelId = 'root_position:y';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="position"][data-axis="y"]');
+          if (input) input.value = value.toFixed(4);
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5210,10 +6393,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentPos = this.motionPlayer.getRootPosition();
-        this.motionPlayer.setRootPosition(currentPos.x, currentPos.y, value);
-        const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="position"][data-axis="z"]');
-        if (slider) slider.value = value.toString();
+        const channelId = 'root_position:z';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="position"][data-axis="z"]');
+          if (slider) slider.value = value.toString();
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5233,10 +6418,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentPos = this.motionPlayer.getRootPosition();
-        this.motionPlayer.setRootPosition(currentPos.x, currentPos.y, value);
-        const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="position"][data-axis="z"]');
-        if (input) input.value = value.toFixed(4);
+        const channelId = 'root_position:z';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="position"][data-axis="z"]');
+          if (input) input.value = value.toFixed(4);
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5369,12 +6556,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentRot = this.motionPlayer.getRootRotation();
-        const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-        const quat = eulerToQuaternion(value, currentEuler.pitch, currentEuler.yaw);
-        this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
-        const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="roll"]');
-        if (slider) slider.value = value.toString();
+        const channelId = 'root_rotation:roll';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="roll"]');
+          if (slider) slider.value = value.toString();
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5394,12 +6581,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentRot = this.motionPlayer.getRootRotation();
-        const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-        const quat = eulerToQuaternion(value, currentEuler.pitch, currentEuler.yaw);
-        this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
-        const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="roll"]');
-        if (input) input.value = value.toFixed(4);
+        const channelId = 'root_rotation:roll';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="roll"]');
+          if (input) input.value = value.toFixed(4);
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5532,12 +6719,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentRot = this.motionPlayer.getRootRotation();
-        const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-        const quat = eulerToQuaternion(currentEuler.roll, value, currentEuler.yaw);
-        this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
-        const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="pitch"]');
-        if (slider) slider.value = value.toString();
+        const channelId = 'root_rotation:pitch';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="pitch"]');
+          if (slider) slider.value = value.toString();
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5557,12 +6744,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentRot = this.motionPlayer.getRootRotation();
-        const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-        const quat = eulerToQuaternion(currentEuler.roll, value, currentEuler.yaw);
-        this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
-        const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="pitch"]');
-        if (input) input.value = value.toFixed(4);
+        const channelId = 'root_rotation:pitch';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="pitch"]');
+          if (input) input.value = value.toFixed(4);
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5695,12 +6882,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentRot = this.motionPlayer.getRootRotation();
-        const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-        const quat = eulerToQuaternion(currentEuler.roll, currentEuler.pitch, value);
-        this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
-        const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="yaw"]');
-        if (slider) slider.value = value.toString();
+        const channelId = 'root_rotation:yaw';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const slider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="yaw"]');
+          if (slider) slider.value = value.toString();
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5720,12 +6907,12 @@ export class AppController {
       const target = event.target as HTMLInputElement;
       const value = parseFloat(target.value);
       if (!isNaN(value)) {
-        const currentRot = this.motionPlayer.getRootRotation();
-        const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-        const quat = eulerToQuaternion(currentEuler.roll, currentEuler.pitch, value);
-        this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
-        const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="yaw"]');
-        if (input) input.value = value.toFixed(4);
+        const channelId = 'root_rotation:yaw';
+        if (this.applyJointControlChannelValue(channelId, value)) {
+          const input = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="yaw"]');
+          if (input) input.value = value.toFixed(4);
+          this.syncAfterJointControlEdit(channelId, { affectsRoot: true });
+        }
       }
     });
 
@@ -5936,184 +7123,177 @@ export class AppController {
   }
 
   private smoothRootAxis(axis: string, currentFrame: number, framesBefore: number, framesAfter: number): void {
-    // 找到相邻的关键帧
-    const keyframeArray = Array.from(this.keyframes).sort((a, b) => a - b);
-    let prevKeyframe = -1;
-    let nextKeyframe = -1;
-    
-    for (let i = 0; i < keyframeArray.length; i++) {
-      if (keyframeArray[i] < currentFrame) {
-        prevKeyframe = keyframeArray[i];
-      } else if (keyframeArray[i] > currentFrame) {
-        nextKeyframe = keyframeArray[i];
-        break;
-      } else {
-        // 当前帧是关键帧，使用相邻的关键帧作为区间
-        if (i > 0) {
-          prevKeyframe = keyframeArray[i - 1];
-        }
-        if (i < keyframeArray.length - 1) {
-          nextKeyframe = keyframeArray[i + 1];
-        }
-        break;
-      }
-    }
-    
-    // 计算用户指定的区间
-    const userStart = Math.max(0, currentFrame - framesBefore);
-    const userEnd = Math.min(this.motionPlayer.getFrameCount() - 1, currentFrame + framesAfter);
-    
-    // 计算关键帧之间的区间
-    const keyframeStart = prevKeyframe !== -1 ? prevKeyframe : userStart;
-    const keyframeEnd = nextKeyframe !== -1 ? nextKeyframe : userEnd;
-    
-    // 确定平滑范围：选择最小的区间
-    let startFrame = Math.max(userStart, keyframeStart);
-    let endFrame = Math.min(userEnd, keyframeEnd);
-    
-    console.log(`Smoothing root ${axis} between frames:`, startFrame, 'and', endFrame);
-    
-    // 四元数转欧拉角
-    function quaternionToEuler(x: number, y: number, z: number, w: number): { roll: number; pitch: number; yaw: number } {
-      const roll = Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y));
-      const pitch = Math.asin(2 * (w * y - z * x));
-      const yaw = Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
-      return { roll, pitch, yaw };
-    }
+    this.withMotionHistoryFrameOverride(currentFrame, () =>
+      this.runMotionHistoryEdit(`smooth_root_axis:${axis}`, () => {
+        // 找到相邻的关键帧
+        const keyframeArray = Array.from(this.keyframes).sort((a, b) => a - b);
+        let prevKeyframe = -1;
+        let nextKeyframe = -1;
 
-    // 欧拉角转四元数
-    function eulerToQuaternion(roll: number, pitch: number, yaw: number): { x: number; y: number; z: number; w: number } {
-      const cy = Math.cos(yaw * 0.5);
-      const sy = Math.sin(yaw * 0.5);
-      const cp = Math.cos(pitch * 0.5);
-      const sp = Math.sin(pitch * 0.5);
-      const cr = Math.cos(roll * 0.5);
-      const sr = Math.sin(roll * 0.5);
+        for (let i = 0; i < keyframeArray.length; i++) {
+          if (keyframeArray[i] < currentFrame) {
+            prevKeyframe = keyframeArray[i];
+          } else if (keyframeArray[i] > currentFrame) {
+            nextKeyframe = keyframeArray[i];
+            break;
+          } else {
+            // 当前帧是关键帧，使用相邻的关键帧作为区间
+            if (i > 0) {
+              prevKeyframe = keyframeArray[i - 1];
+            }
+            if (i < keyframeArray.length - 1) {
+              nextKeyframe = keyframeArray[i + 1];
+            }
+            break;
+          }
+        }
 
-      return {
-        w: cy * cp * cr + sy * sp * sr,
-        x: cy * cp * sr - sy * sp * cr,
-        y: sy * cp * sr + cy * sp * cr,
-        z: sy * cp * cr - cy * sp * sr
-      };
-    }
-    
-    // 保存当前帧的值
-    let currentValue: number;
-    let startValue: number;
-    let endValue: number;
-    
-    const originalFrame = this.motionPlayer.getCurrentFrame();
-    
-    if (axis === 'x' || axis === 'y' || axis === 'z') {
-      // 位置轴
-      const currentPos = this.motionPlayer.getRootPosition();
-      currentValue = currentPos[axis as keyof typeof currentPos];
-      
-      // 获取开始帧和结束帧的值
-      this.motionPlayer.seek(startFrame);
-      const startPos = this.motionPlayer.getRootPosition();
-      startValue = startPos[axis as keyof typeof startPos];
-      
-      this.motionPlayer.seek(endFrame);
-      const endPos = this.motionPlayer.getRootPosition();
-      endValue = endPos[axis as keyof typeof endPos];
-      
-      // 恢复到当前帧
-      this.motionPlayer.seek(currentFrame);
-      
-      // 平滑开始帧到当前帧
-      for (let frame = startFrame + 1; frame < currentFrame; frame++) {
-        const t = (frame - startFrame) / (currentFrame - startFrame);
-        const value = startValue + (currentValue - startValue) * t;
-        
-        this.motionPlayer.seek(frame);
-        const currentPos = this.motionPlayer.getRootPosition();
-        if (axis === 'x') {
-          this.motionPlayer.setRootPosition(value, currentPos.y, currentPos.z);
-        } else if (axis === 'y') {
-          this.motionPlayer.setRootPosition(currentPos.x, value, currentPos.z);
-        } else if (axis === 'z') {
-          this.motionPlayer.setRootPosition(currentPos.x, currentPos.y, value);
+        // 计算用户指定的区间
+        const userStart = Math.max(0, currentFrame - framesBefore);
+        const userEnd = Math.min(this.motionPlayer.getFrameCount() - 1, currentFrame + framesAfter);
+
+        // 计算关键帧之间的区间
+        const keyframeStart = prevKeyframe !== -1 ? prevKeyframe : userStart;
+        const keyframeEnd = nextKeyframe !== -1 ? nextKeyframe : userEnd;
+
+        // 确定平滑范围：选择最小的区间
+        const startFrame = Math.max(userStart, keyframeStart);
+        const endFrame = Math.min(userEnd, keyframeEnd);
+
+        console.log(`Smoothing root ${axis} between frames:`, startFrame, 'and', endFrame);
+
+        // 四元数转欧拉角
+        function quaternionToEuler(x: number, y: number, z: number, w: number): { roll: number; pitch: number; yaw: number } {
+          const roll = Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y));
+          const pitch = Math.asin(2 * (w * y - z * x));
+          const yaw = Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
+          return { roll, pitch, yaw };
         }
-      }
-      
-      // 平滑当前帧到结束帧
-      for (let frame = currentFrame + 1; frame < endFrame; frame++) {
-        const t = (frame - currentFrame) / (endFrame - currentFrame);
-        const value = currentValue + (endValue - currentValue) * t;
-        
-        this.motionPlayer.seek(frame);
-        const currentPos = this.motionPlayer.getRootPosition();
-        if (axis === 'x') {
-          this.motionPlayer.setRootPosition(value, currentPos.y, currentPos.z);
-        } else if (axis === 'y') {
-          this.motionPlayer.setRootPosition(currentPos.x, value, currentPos.z);
-        } else if (axis === 'z') {
-          this.motionPlayer.setRootPosition(currentPos.x, currentPos.y, value);
+
+        // 欧拉角转四元数
+        function eulerToQuaternion(roll: number, pitch: number, yaw: number): { x: number; y: number; z: number; w: number } {
+          const cy = Math.cos(yaw * 0.5);
+          const sy = Math.sin(yaw * 0.5);
+          const cp = Math.cos(pitch * 0.5);
+          const sp = Math.sin(pitch * 0.5);
+          const cr = Math.cos(roll * 0.5);
+          const sr = Math.sin(roll * 0.5);
+
+          return {
+            w: cy * cp * cr + sy * sp * sr,
+            x: cy * cp * sr - sy * sp * cr,
+            y: sy * cp * sr + cy * sp * cr,
+            z: sy * cp * cr - cy * sp * sr
+          };
         }
-      }
-    } else if (axis === 'roll' || axis === 'pitch' || axis === 'yaw') {
-      // 旋转轴
-      const currentRot = this.motionPlayer.getRootRotation();
-      const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-      currentValue = currentEuler[axis as keyof typeof currentEuler];
-      
-      // 获取开始帧和结束帧的值
-      this.motionPlayer.seek(startFrame);
-      const startRot = this.motionPlayer.getRootRotation();
-      const startEuler = quaternionToEuler(startRot.x, startRot.y, startRot.z, startRot.w);
-      startValue = startEuler[axis as keyof typeof startEuler];
-      
-      this.motionPlayer.seek(endFrame);
-      const endRot = this.motionPlayer.getRootRotation();
-      const endEuler = quaternionToEuler(endRot.x, endRot.y, endRot.z, endRot.w);
-      endValue = endEuler[axis as keyof typeof endEuler];
-      
-      // 恢复到当前帧
-      this.motionPlayer.seek(currentFrame);
-      
-      // 平滑开始帧到当前帧
-      for (let frame = startFrame + 1; frame < currentFrame; frame++) {
-        const t = (frame - startFrame) / (currentFrame - startFrame);
-        const value = startValue + (currentValue - startValue) * t;
-        
-        this.motionPlayer.seek(frame);
-        const currentRot = this.motionPlayer.getRootRotation();
-        const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-        let quat = eulerToQuaternion(currentEuler.roll, currentEuler.pitch, currentEuler.yaw);
-        if (axis === 'roll') {
-          quat = eulerToQuaternion(value, currentEuler.pitch, currentEuler.yaw);
-        } else if (axis === 'pitch') {
-          quat = eulerToQuaternion(currentEuler.roll, value, currentEuler.yaw);
-        } else if (axis === 'yaw') {
-          quat = eulerToQuaternion(currentEuler.roll, currentEuler.pitch, value);
+
+        // 保存当前帧的值
+        let currentValue: number;
+        let startValue: number;
+        let endValue: number;
+
+        const originalFrame = this.motionPlayer.getCurrentFrame();
+
+        if (axis === 'x' || axis === 'y' || axis === 'z') {
+          const currentPos = this.motionPlayer.getRootPosition();
+          currentValue = currentPos[axis as keyof typeof currentPos];
+
+          this.motionPlayer.seek(startFrame);
+          const startPos = this.motionPlayer.getRootPosition();
+          startValue = startPos[axis as keyof typeof startPos];
+
+          this.motionPlayer.seek(endFrame);
+          const endPos = this.motionPlayer.getRootPosition();
+          endValue = endPos[axis as keyof typeof endPos];
+
+          this.motionPlayer.seek(currentFrame);
+
+          for (let frame = startFrame + 1; frame < currentFrame; frame++) {
+            const t = (frame - startFrame) / (currentFrame - startFrame);
+            const value = startValue + (currentValue - startValue) * t;
+
+            this.motionPlayer.seek(frame);
+            const framePos = this.motionPlayer.getRootPosition();
+            if (axis === 'x') {
+              this.motionPlayer.setRootPosition(value, framePos.y, framePos.z);
+            } else if (axis === 'y') {
+              this.motionPlayer.setRootPosition(framePos.x, value, framePos.z);
+            } else {
+              this.motionPlayer.setRootPosition(framePos.x, framePos.y, value);
+            }
+          }
+
+          for (let frame = currentFrame + 1; frame < endFrame; frame++) {
+            const t = (frame - currentFrame) / (endFrame - currentFrame);
+            const value = currentValue + (endValue - currentValue) * t;
+
+            this.motionPlayer.seek(frame);
+            const framePos = this.motionPlayer.getRootPosition();
+            if (axis === 'x') {
+              this.motionPlayer.setRootPosition(value, framePos.y, framePos.z);
+            } else if (axis === 'y') {
+              this.motionPlayer.setRootPosition(framePos.x, value, framePos.z);
+            } else {
+              this.motionPlayer.setRootPosition(framePos.x, framePos.y, value);
+            }
+          }
+        } else if (axis === 'roll' || axis === 'pitch' || axis === 'yaw') {
+          const currentRot = this.motionPlayer.getRootRotation();
+          const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
+          currentValue = currentEuler[axis as keyof typeof currentEuler];
+
+          this.motionPlayer.seek(startFrame);
+          const startRot = this.motionPlayer.getRootRotation();
+          const startEuler = quaternionToEuler(startRot.x, startRot.y, startRot.z, startRot.w);
+          startValue = startEuler[axis as keyof typeof startEuler];
+
+          this.motionPlayer.seek(endFrame);
+          const endRot = this.motionPlayer.getRootRotation();
+          const endEuler = quaternionToEuler(endRot.x, endRot.y, endRot.z, endRot.w);
+          endValue = endEuler[axis as keyof typeof endEuler];
+
+          this.motionPlayer.seek(currentFrame);
+
+          for (let frame = startFrame + 1; frame < currentFrame; frame++) {
+            const t = (frame - startFrame) / (currentFrame - startFrame);
+            const value = startValue + (currentValue - startValue) * t;
+
+            this.motionPlayer.seek(frame);
+            const frameRot = this.motionPlayer.getRootRotation();
+            const frameEuler = quaternionToEuler(frameRot.x, frameRot.y, frameRot.z, frameRot.w);
+            let quat = eulerToQuaternion(frameEuler.roll, frameEuler.pitch, frameEuler.yaw);
+            if (axis === 'roll') {
+              quat = eulerToQuaternion(value, frameEuler.pitch, frameEuler.yaw);
+            } else if (axis === 'pitch') {
+              quat = eulerToQuaternion(frameEuler.roll, value, frameEuler.yaw);
+            } else {
+              quat = eulerToQuaternion(frameEuler.roll, frameEuler.pitch, value);
+            }
+            this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
+          }
+
+          for (let frame = currentFrame + 1; frame < endFrame; frame++) {
+            const t = (frame - currentFrame) / (endFrame - currentFrame);
+            const value = currentValue + (endValue - currentValue) * t;
+
+            this.motionPlayer.seek(frame);
+            const frameRot = this.motionPlayer.getRootRotation();
+            const frameEuler = quaternionToEuler(frameRot.x, frameRot.y, frameRot.z, frameRot.w);
+            let quat = eulerToQuaternion(frameEuler.roll, frameEuler.pitch, frameEuler.yaw);
+            if (axis === 'roll') {
+              quat = eulerToQuaternion(value, frameEuler.pitch, frameEuler.yaw);
+            } else if (axis === 'pitch') {
+              quat = eulerToQuaternion(frameEuler.roll, value, frameEuler.yaw);
+            } else {
+              quat = eulerToQuaternion(frameEuler.roll, frameEuler.pitch, value);
+            }
+            this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
+          }
         }
-        this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
-      }
-      
-      // 平滑当前帧到结束帧
-      for (let frame = currentFrame + 1; frame < endFrame; frame++) {
-        const t = (frame - currentFrame) / (endFrame - currentFrame);
-        const value = currentValue + (endValue - currentValue) * t;
-        
-        this.motionPlayer.seek(frame);
-        const currentRot = this.motionPlayer.getRootRotation();
-        const currentEuler = quaternionToEuler(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-        let quat = eulerToQuaternion(currentEuler.roll, currentEuler.pitch, currentEuler.yaw);
-        if (axis === 'roll') {
-          quat = eulerToQuaternion(value, currentEuler.pitch, currentEuler.yaw);
-        } else if (axis === 'pitch') {
-          quat = eulerToQuaternion(currentEuler.roll, value, currentEuler.yaw);
-        } else if (axis === 'yaw') {
-          quat = eulerToQuaternion(currentEuler.roll, currentEuler.pitch, value);
-        }
-        this.motionPlayer.setRootRotation(quat.x, quat.y, quat.z, quat.w);
-      }
-    }
-    
-    // 恢复到原始帧
-    this.motionPlayer.seek(originalFrame);
+
+        this.motionPlayer.seek(originalFrame);
+      }),
+    );
   }
 
   private smoothRootRotation(startFrame: number, currentFrame: number, endFrame: number): void {
@@ -6198,6 +7378,10 @@ export class AppController {
     // 更新root关节的值
     const rootPos = this.motionPlayer.getRootPosition();
     const rootRot = this.motionPlayer.getRootRotation();
+    const rootEuler = new Euler().setFromQuaternion(
+      new Quaternion(rootRot.x, rootRot.y, rootRot.z, rootRot.w),
+      'XYZ',
+    );
 
     // 更新root位置输入框
     const posXInput = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="position"][data-axis="x"]');
@@ -6215,25 +7399,21 @@ export class AppController {
     const posZSlider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="position"][data-axis="z"]');
     if (posZSlider) posZSlider.value = rootPos.z.toString();
 
-    // 更新root旋转输入框
-    const rotXInput = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="x"]');
-    if (rotXInput) rotXInput.value = rootRot.x.toFixed(4);
-    const rotYInput = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="y"]');
-    if (rotYInput) rotYInput.value = rootRot.y.toFixed(4);
-    const rotZInput = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="z"]');
-    if (rotZInput) rotZInput.value = rootRot.z.toFixed(4);
-    const rotWInput = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="w"]');
-    if (rotWInput) rotWInput.value = rootRot.w.toFixed(4);
+    // 更新root旋转输入框（欧拉角）
+    const rotRollInput = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="roll"]');
+    if (rotRollInput) rotRollInput.value = rootEuler.x.toFixed(4);
+    const rotPitchInput = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="pitch"]');
+    if (rotPitchInput) rotPitchInput.value = rootEuler.y.toFixed(4);
+    const rotYawInput = this.jointList.querySelector<HTMLInputElement>('.joint-input[data-root-control="rotation"][data-axis="yaw"]');
+    if (rotYawInput) rotYawInput.value = rootEuler.z.toFixed(4);
 
-    // 更新root旋转滑块
-    const rotXSlider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="x"]');
-    if (rotXSlider) rotXSlider.value = rootRot.x.toString();
-    const rotYSlider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="y"]');
-    if (rotYSlider) rotYSlider.value = rootRot.y.toString();
-    const rotZSlider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="z"]');
-    if (rotZSlider) rotZSlider.value = rootRot.z.toString();
-    const rotWSlider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="w"]');
-    if (rotWSlider) rotWSlider.value = rootRot.w.toString();
+    // 更新root旋转滑块（欧拉角）
+    const rotRollSlider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="roll"]');
+    if (rotRollSlider) rotRollSlider.value = rootEuler.x.toString();
+    const rotPitchSlider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="pitch"]');
+    if (rotPitchSlider) rotPitchSlider.value = rootEuler.y.toString();
+    const rotYawSlider = this.jointList.querySelector<HTMLInputElement>('.root-slider[data-root-control="rotation"][data-axis="yaw"]');
+    if (rotYawSlider) rotYawSlider.value = rootEuler.z.toString();
 
     // 更新普通关节的值
     const jointInputs = this.jointList.querySelectorAll<HTMLInputElement>('.joint-input:not([data-root-control])');
@@ -6250,6 +7430,8 @@ export class AppController {
         slider.value = jointValues[index].toString();
       }
     });
+
+    this.refreshCurveEditor();
   }
 
   private showJointPanel(): void {
@@ -6259,6 +7441,7 @@ export class AppController {
       if (jointNames.length > 0) {
         this.renderJointPanel(jointNames, jointValues);
         this.jointPanel.hidden = false;
+        this.showCurvePanel();
       }
     }
   }
@@ -6266,6 +7449,247 @@ export class AppController {
   private hideJointPanel(): void {
     this.jointPanel.hidden = true;
     this.jointList.innerHTML = '';
+    this.hideCurvePanel();
+  }
+
+  private showCurvePanel(): void {
+    this.curvePanel.hidden = false;
+    this.syncCurvePanelCollapsedState();
+    this.refreshCurveEditor();
+  }
+
+  private hideCurvePanel(): void {
+    this.curvePanel.hidden = true;
+    this.selectedCurveChannelId = null;
+    this.curveEditor.clear();
+  }
+
+  private selectCurveChannel(channelId: string | null): void {
+    this.selectedCurveChannelId = channelId;
+    this.showCurvePanel();
+  }
+
+  private refreshCurveEditor(): void {
+    if (this.curvePanel.hidden || !isUrdfMotionKind(this.currentMotionKind) || !this.currentMotionClip) {
+      if (!this.curvePanel.hidden && !isUrdfMotionKind(this.currentMotionKind)) {
+        this.curveEditor.clear();
+      }
+      this.syncCurveFrameControls(0, 0);
+      this.syncCurveLockControls(0, 0);
+      return;
+    }
+
+    const channels = this.motionPlayer.getCurveChannels();
+    const fallbackChannelId = channels[0]?.id ?? null;
+    if (!this.selectedCurveChannelId || !channels.some((channel) => channel.id === this.selectedCurveChannelId)) {
+      this.selectedCurveChannelId = fallbackChannelId;
+    }
+
+    this.curveEditor.setChannels(channels, this.selectedCurveChannelId);
+
+    const snapshot = this.motionFrameSnapshot;
+    const currentFrame = snapshot?.frameIndex ?? this.motionPlayer.getCurrentFrame();
+    const frameCount = snapshot?.frameCount ?? this.motionPlayer.getFrameCount();
+    const fps = snapshot?.fps ?? this.currentMotionClip.fps;
+    this.syncCurveFrameControls(frameCount, currentFrame);
+    this.syncCurveRangeInputs(frameCount, currentFrame);
+    this.syncCurveLockControls(frameCount, currentFrame);
+
+    if (!this.selectedCurveChannelId) {
+      this.curveEditor.setSeries(new Float32Array(), currentFrame, frameCount, fps);
+      this.curveEditor.setSelectedRange(
+        this.selectedCurveRangeStartFrame,
+        this.selectedCurveRangeEndFrame,
+      );
+      return;
+    }
+
+    const values = this.motionPlayer.getChannelValues(this.selectedCurveChannelId);
+    this.curveEditor.setSeries(values, currentFrame, frameCount, fps);
+    this.curveEditor.setSelectedRange(
+      this.selectedCurveRangeStartFrame,
+      this.selectedCurveRangeEndFrame,
+    );
+  }
+
+  private formatCurveLockValue(value: number): string {
+    if (!Number.isFinite(value)) {
+      return '0';
+    }
+    if (Math.abs(value) < 1e-12) {
+      return '0';
+    }
+    return String(Number(value.toFixed(6)));
+  }
+
+  private syncCurveLockControls(frameCount: number, currentFrame: number): void {
+    const canLock =
+      frameCount > 0 &&
+      isUrdfMotionKind(this.currentMotionKind) &&
+      Boolean(this.currentMotionClip && this.selectedCurveChannelId);
+
+    this.curveLockValueInput.disabled = !canLock;
+    this.curveLockUseCurrentButton.disabled = !canLock;
+    this.curveLockApplyButton.disabled = !canLock;
+
+    if (!canLock || !this.selectedCurveChannelId) {
+      this.curveLockValueInput.placeholder = '';
+      return;
+    }
+
+    const values = this.motionPlayer.getChannelValues(this.selectedCurveChannelId);
+    if (values.length !== frameCount) {
+      this.curveLockValueInput.placeholder = '';
+      return;
+    }
+
+    const clampedFrame = Math.max(0, Math.min(frameCount - 1, currentFrame));
+    this.curveLockValueInput.placeholder = this.formatCurveLockValue(values[clampedFrame] ?? 0);
+  }
+
+  private syncCurveFrameControls(frameCount: number, currentFrame: number): void {
+    if (!isUrdfMotionKind(this.currentMotionKind) || frameCount <= 0) {
+      this.curveFrameSlider.min = '0';
+      this.curveFrameSlider.max = '0';
+      this.curveFrameSlider.step = '1';
+      this.curveFrameSlider.value = '0';
+      this.curveFrameSlider.disabled = true;
+      this.curveFrameInput.min = '1';
+      this.curveFrameInput.max = '1';
+      this.curveFrameInput.step = '1';
+      if (!this.isEditingCurveFrameInput || document.activeElement !== this.curveFrameInput) {
+        this.curveFrameInput.value = '1';
+      }
+      this.curveFrameInput.disabled = true;
+      this.curveFrameTotal.textContent = '/ 0';
+      return;
+    }
+
+    const clampedFrame = Math.max(0, Math.min(frameCount - 1, currentFrame));
+    this.curveFrameSlider.min = '0';
+    this.curveFrameSlider.max = String(Math.max(frameCount - 1, 0));
+    this.curveFrameSlider.step = '1';
+    this.curveFrameSlider.value = String(clampedFrame);
+    this.curveFrameSlider.disabled = false;
+    this.curveFrameInput.min = '1';
+    this.curveFrameInput.max = String(frameCount);
+    this.curveFrameInput.step = '1';
+    if (!this.isEditingCurveFrameInput || document.activeElement !== this.curveFrameInput) {
+      this.curveFrameInput.value = String(clampedFrame + 1);
+    }
+    this.curveFrameInput.disabled = false;
+    this.curveFrameTotal.textContent = `/ ${frameCount}`;
+  }
+
+  private setCurveFrameRange(startFrame: number | null, endFrame: number | null): void {
+    const frameCount = this.currentMotionClip?.frameCount ?? this.motionPlayer.getFrameCount();
+    if (
+      frameCount <= 0 ||
+      startFrame === null ||
+      endFrame === null ||
+      typeof startFrame !== 'number' ||
+      typeof endFrame !== 'number' ||
+      !Number.isFinite(startFrame) ||
+      !Number.isFinite(endFrame)
+    ) {
+      this.selectedCurveRangeStartFrame = null;
+      this.selectedCurveRangeEndFrame = null;
+    } else {
+      const maxFrame = Math.max(frameCount - 1, 0);
+      const normalizedStart = Math.max(
+        0,
+        Math.min(maxFrame, Math.floor(Math.min(startFrame, endFrame))),
+      );
+      const normalizedEnd = Math.max(
+        normalizedStart,
+        Math.min(maxFrame, Math.floor(Math.max(startFrame, endFrame))),
+      );
+      this.selectedCurveRangeStartFrame = normalizedStart;
+      this.selectedCurveRangeEndFrame = normalizedEnd;
+    }
+
+    const currentFrame = this.motionFrameSnapshot?.frameIndex ?? this.motionPlayer.getCurrentFrame();
+    this.syncCurveRangeInputs(frameCount, currentFrame);
+    this.curveEditor.setSelectedRange(
+      this.selectedCurveRangeStartFrame,
+      this.selectedCurveRangeEndFrame,
+    );
+  }
+
+  private syncCurveRangeInputs(frameCount: number, currentFrame: number): void {
+    const hasFrames = frameCount > 0 && isUrdfMotionKind(this.currentMotionKind);
+    const maxFrame = Math.max(frameCount, 1);
+
+    this.curveRangeStartInput.min = '1';
+    this.curveRangeEndInput.min = '1';
+    this.curveRangeStartInput.max = String(maxFrame);
+    this.curveRangeEndInput.max = String(maxFrame);
+
+    if (
+      hasFrames &&
+      this.selectedCurveRangeStartFrame !== null &&
+      this.selectedCurveRangeEndFrame !== null
+    ) {
+      const clampedStart = Math.max(0, Math.min(frameCount - 1, this.selectedCurveRangeStartFrame));
+      const clampedEnd = Math.max(clampedStart, Math.min(frameCount - 1, this.selectedCurveRangeEndFrame));
+      this.selectedCurveRangeStartFrame = clampedStart;
+      this.selectedCurveRangeEndFrame = clampedEnd;
+      this.curveRangeStartInput.value = String(clampedStart + 1);
+      this.curveRangeEndInput.value = String(clampedEnd + 1);
+    } else if (hasFrames) {
+      this.curveRangeStartInput.value = '';
+      this.curveRangeEndInput.value = '';
+    } else if (!hasFrames) {
+      this.curveRangeStartInput.value = '';
+      this.curveRangeEndInput.value = '';
+    }
+
+    const hasSelection =
+      hasFrames &&
+      this.selectedCurveRangeStartFrame !== null &&
+      this.selectedCurveRangeEndFrame !== null;
+    const canEditRange = hasSelection && Boolean(this.selectedCurveChannelId);
+
+    this.curveRangeStartInput.disabled = !hasFrames;
+    this.curveRangeEndInput.disabled = !hasFrames;
+    this.curveRangeBlendInput.disabled = !canEditRange;
+    this.curveRangeOffsetInput.disabled = !canEditRange;
+    this.curveRangeSmoothPassesInput.disabled = !canEditRange;
+    this.curveRangeCopyCountInput.disabled = !hasSelection;
+    this.curveRangeClearButton.disabled = !hasSelection;
+    this.curveRangeStartCurrentButton.disabled = !hasFrames;
+    this.curveRangeEndCurrentButton.disabled = !hasFrames;
+    this.curveRangeApplyButton.disabled = !canEditRange;
+    this.curveRangeSmoothButton.disabled = !canEditRange;
+    this.curveRangeDuplicateButton.disabled = !hasSelection;
+    this.curveRangeCropButton.disabled = !hasSelection;
+
+    if (!hasSelection && hasFrames) {
+      const displayFrame = Math.max(0, Math.min(frameCount, currentFrame + 1));
+      this.curveRangeStartInput.placeholder = String(displayFrame);
+      this.curveRangeEndInput.placeholder = String(displayFrame);
+    } else {
+      this.curveRangeStartInput.placeholder = '';
+      this.curveRangeEndInput.placeholder = '';
+    }
+  }
+
+  private getSelectedCurveFrameRange(): { start: number; end: number } | null {
+    if (
+      this.selectedCurveRangeStartFrame === null ||
+      this.selectedCurveRangeEndFrame === null
+    ) {
+      return null;
+    }
+
+    return {
+      start: this.selectedCurveRangeStartFrame,
+      end: this.selectedCurveRangeEndFrame,
+    };
+  }
+
+  private getCurrentUrdfFrame(): number {
+    return this.motionFrameSnapshot?.frameIndex ?? this.motionPlayer.getCurrentFrame();
   }
 
   private readonly onDatasetPanelMinimizeClick = (): void => {
@@ -6276,7 +7700,164 @@ export class AppController {
 
   private readonly onStatusPanelMinimizeClick = (): void => {
     this.isStatusPanelMinimized = !this.isStatusPanelMinimized;
-    this.statusPanel.dataset.minimized = this.isStatusPanelMinimized ? 'true' : 'false';
-    this.statusPanelMinimizeBtn.textContent = this.isStatusPanelMinimized ? '+' : '_';
+    this.syncStatusPanelMinimizedState();
   };
+
+  private syncStatusPanelMinimizedState(): void {
+    this.statusPanel.dataset.minimized = this.isStatusPanelMinimized ? 'true' : 'false';
+    this.appRoot.dataset.statusPanelMinimized = this.isStatusPanelMinimized ? 'true' : 'false';
+    this.statusPanelMinimizeBtn.textContent = this.isStatusPanelMinimized ? '+' : '_';
+  }
+
+  private readonly onCurvePanelToggleClick = (): void => {
+    this.isCurvePanelCollapsed = !this.isCurvePanelCollapsed;
+    this.syncCurvePanelCollapsedState();
+  };
+
+  private readonly onCurveRangeInputChange = (): void => {
+    const startValue = this.curveRangeStartInput.valueAsNumber;
+    const endValue = this.curveRangeEndInput.valueAsNumber;
+    if (!Number.isFinite(startValue) || !Number.isFinite(endValue)) {
+      return;
+    }
+
+    this.setCurveFrameRange(startValue - 1, endValue - 1);
+  };
+
+  private readonly onCurveRangeClearClick = (): void => {
+    this.setCurveFrameRange(null, null);
+  };
+
+  private readonly onCurveRangeStartCurrentClick = (): void => {
+    const currentFrame = this.getCurrentUrdfFrame();
+    if (
+      this.selectedCurveRangeStartFrame !== null &&
+      this.selectedCurveRangeEndFrame !== null &&
+      this.selectedCurveRangeStartFrame === currentFrame
+    ) {
+      this.setCurveFrameRange(null, null);
+      return;
+    }
+
+    const endFrame = this.selectedCurveRangeEndFrame ?? currentFrame;
+    this.setCurveFrameRange(currentFrame, endFrame);
+  };
+
+  private readonly onCurveRangeEndCurrentClick = (): void => {
+    const currentFrame = this.getCurrentUrdfFrame();
+    if (
+      this.selectedCurveRangeStartFrame !== null &&
+      this.selectedCurveRangeEndFrame !== null &&
+      this.selectedCurveRangeEndFrame === currentFrame
+    ) {
+      this.setCurveFrameRange(null, null);
+      return;
+    }
+
+    const startFrame = this.selectedCurveRangeStartFrame ?? currentFrame;
+    this.setCurveFrameRange(startFrame, currentFrame);
+  };
+
+  private readonly onCurveRangeApplyClick = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.selectedCurveChannelId) {
+      return;
+    }
+
+    const selectedRange = this.getSelectedCurveFrameRange();
+    if (!selectedRange) {
+      return;
+    }
+
+    const delta = Number(this.curveRangeOffsetInput.value);
+    const blendFrames = Number(this.curveRangeBlendInput.value);
+    if (!Number.isFinite(delta) || !Number.isFinite(blendFrames)) {
+      return;
+    }
+
+    if (
+      this.motionPlayer.offsetChannelRange(
+        this.selectedCurveChannelId,
+        selectedRange.start,
+        selectedRange.end,
+        delta,
+        blendFrames,
+      )
+    ) {
+      this.sceneController.syncGroundToCurrentRobot();
+      this.sceneController.syncViewToCurrentRobot();
+      this.refreshCurveEditor();
+    }
+  };
+
+  private readonly onCurveRangeSmoothClick = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.selectedCurveChannelId) {
+      return;
+    }
+
+    const selectedRange = this.getSelectedCurveFrameRange();
+    if (!selectedRange) {
+      return;
+    }
+
+    const passes = Number(this.curveRangeSmoothPassesInput.value);
+    if (!Number.isFinite(passes)) {
+      return;
+    }
+
+    if (
+      this.motionPlayer.smoothChannelRange(
+        this.selectedCurveChannelId,
+        selectedRange.start,
+        selectedRange.end,
+        passes,
+      )
+    ) {
+      this.sceneController.syncGroundToCurrentRobot();
+      this.sceneController.syncViewToCurrentRobot();
+      this.refreshCurveEditor();
+    }
+  };
+
+  private readonly onCurveLockUseCurrentClick = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.selectedCurveChannelId) {
+      return;
+    }
+
+    const values = this.motionPlayer.getChannelValues(this.selectedCurveChannelId);
+    const currentFrame = this.getCurrentUrdfFrame();
+    if (values.length === 0) {
+      return;
+    }
+
+    const clampedFrame = Math.max(0, Math.min(values.length - 1, currentFrame));
+    this.curveLockValueInput.value = this.formatCurveLockValue(values[clampedFrame] ?? 0);
+  };
+
+  private readonly onCurveLockApplyClick = (): void => {
+    if (!isUrdfMotionKind(this.currentMotionKind) || !this.selectedCurveChannelId) {
+      return;
+    }
+
+    const value = Number(this.curveLockValueInput.value);
+    if (!Number.isFinite(value)) {
+      return;
+    }
+
+    const channelId = this.selectedCurveChannelId;
+    const selectedRange = this.getSelectedCurveFrameRange();
+    const currentFrame = this.getCurrentUrdfFrame();
+    const targetStart = selectedRange?.start ?? currentFrame;
+    const targetEnd = selectedRange?.end ?? currentFrame;
+
+    this.runMotionHistoryEdit(`channel_constant:${channelId}:${targetStart}:${targetEnd}`, () => {
+      if (!this.motionPlayer.setChannelConstant(channelId, value, targetStart, targetEnd)) {
+        return;
+      }
+
+      this.sceneController.syncGroundToCurrentRobot();
+      this.sceneController.syncViewToCurrentRobot();
+      this.refreshCurveEditor();
+    });
+  };
+
 }

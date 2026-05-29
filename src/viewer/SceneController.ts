@@ -1,22 +1,31 @@
 import {
   ACESFilmicToneMapping,
   Box3,
+  BufferGeometry,
+  CanvasTexture,
   Color,
   DirectionalLight,
+  DoubleSide,
+  Fog,
+  Float32BufferAttribute,
   Group,
   GridHelper,
   HemisphereLight,
+  Line,
+  LineBasicMaterial,
   Mesh,
+  MeshBasicMaterial,
   MeshPhongMaterial,
   PCFSoftShadowMap,
   PerspectiveCamera,
   PlaneGeometry,
   PMREMGenerator,
   Raycaster,
+  RepeatWrapping,
   SRGBColorSpace,
   Scene,
-  ShadowMaterial,
   Sphere,
+  SphereGeometry,
   Vector2,
   Vector3,
   WebGLRenderer,
@@ -24,6 +33,8 @@ import {
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 import type { UrdfRobotLike, ViewMode } from '../types/viewer';
+
+type ThreeVector3 = InstanceType<typeof Vector3>;
 
 const HALF_PI = Math.PI / 2;
 const GRID_BASE_SIZE = 20;
@@ -35,9 +46,49 @@ const DEFAULT_FILL_LIGHT_POSITION = new Vector3(-2.2, 3.1, -2.4);
 const DEFAULT_RIM_LIGHT_POSITION = new Vector3(0, 4, -5);
 const SMPL_FILL_LIGHT_OFFSET = new Vector3(-3.1, 3.6, 2.7);
 const SMPL_RIM_LIGHT_OFFSET = new Vector3(2.8, 2.9, -3.0);
+const GROUND_DISPLAY_BASE_SIZE = 200;
+const GROUND_GRID_DIVISIONS = 200;
+const GROUND_MAJOR_LINE_INTERVAL = 5;
+const GROUND_MAJOR_GRID_DIVISIONS = GROUND_GRID_DIVISIONS / GROUND_MAJOR_LINE_INTERVAL;
+const GROUND_TEXTURE_SIZE = 256;
+const GROUND_TEXTURE_REPEAT = GROUND_GRID_DIVISIONS / 2;
+const DEFAULT_SKY_COLOR = '#d8e4ee';
+const DEFAULT_HAZE_COLOR = '#bfd1df';
+const DEFAULT_FOG_NEAR = 18;
+const DEFAULT_FOG_FAR = 54;
 const DARK_COLOR_EPSILON = 0.06;
 const ROOT_TRACK_JOINT_NAME = 'floating_base_joint';
+const FLOOR_ALIGNMENT_EPSILON = 0.002;
 type SceneVisualProfile = 'default' | 'smpl';
+
+export interface StabilityOverlayFrame {
+  visible: boolean;
+  stable: boolean;
+  centerOfMass: ThreeVector3 | null;
+  centerOfMassProjection: ThreeVector3 | null;
+  supportPolygon: ThreeVector3[];
+}
+
+export function computeGroundPlaneY(boxMinY: number, groundingOffset: number): number {
+  const groundedMinY = boxMinY - groundingOffset;
+  if (Math.abs(groundedMinY) <= FLOOR_ALIGNMENT_EPSILON) {
+    return 0;
+  }
+
+  return boxMinY;
+}
+
+export function resolveGroundPlaneY(
+  boxMinY: number,
+  groundingOffset: number,
+  anchoredGroundY: number | null,
+): number {
+  if (anchoredGroundY !== null) {
+    return anchoredGroundY;
+  }
+
+  return computeGroundPlaneY(boxMinY, groundingOffset);
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -140,6 +191,41 @@ export function evaluateScaleWarning(maxDimension: number): string | null {
   return null;
 }
 
+function getRobotGroundingOffset(robot: UrdfRobotLike): number {
+  void robot;
+  // Keep the floor anchored at the scene origin. Robot height should come from
+  // the motion root Z track instead of a hard-coded per-robot lift.
+  return 0;
+}
+
+function createMujocoGroundTexture(): any {
+  const canvas = document.createElement('canvas');
+  canvas.width = GROUND_TEXTURE_SIZE;
+  canvas.height = GROUND_TEXTURE_SIZE;
+
+  const context = canvas.getContext('2d');
+  if (context) {
+    const lightTile = '#dce8f1';
+    const darkTile = '#c4d6e3';
+    const halfWidth = canvas.width / 2;
+    const halfHeight = canvas.height / 2;
+
+    context.fillStyle = lightTile;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    context.fillStyle = darkTile;
+    context.fillRect(halfWidth, 0, halfWidth, halfHeight);
+    context.fillRect(0, halfHeight, halfWidth, halfHeight);
+  }
+
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  texture.wrapS = RepeatWrapping;
+  texture.wrapT = RepeatWrapping;
+  texture.repeat.set(GROUND_TEXTURE_REPEAT, GROUND_TEXTURE_REPEAT);
+  return texture;
+}
+
 export class SceneController {
   public onViewWarning: ((warning: string | null) => void) | null = null;
   public onJointClick?: (jointName: string) => void;
@@ -156,7 +242,20 @@ export class SceneController {
   private readonly rimLight: any;
   private readonly keyLightOffset: any;
   private readonly groundPlane: any;
+  private readonly groundTexture: any;
   private readonly referenceGrid: any;
+  private readonly majorGrid: any;
+  private readonly stabilityOverlayGroup: any;
+  private readonly stabilityComMarker: any;
+  private readonly stabilityProjectionMarker: any;
+  private readonly stabilityProjectionLine: any;
+  private readonly stabilitySupportFill: any;
+  private readonly stabilitySupportOutline: any;
+  private readonly stabilityComMaterial: any;
+  private readonly stabilityProjectionMaterial: any;
+  private readonly stabilityProjectionLineMaterial: any;
+  private readonly stabilitySupportFillMaterial: any;
+  private readonly stabilitySupportOutlineMaterial: any;
   private readonly pmremGenerator: any;
   private readonly environmentMapTarget: any;
   private currentRobot: UrdfRobotLike | null = null;
@@ -170,6 +269,10 @@ export class SceneController {
   private animationFrameId = 0;
   private readonly tempTrackTarget = new Vector3();
   private readonly tempCameraOffset = new Vector3();
+  private readonly tempGroundAnchor = new Vector3();
+  private currentGroundY = 0;
+  private anchoredGroundY: number | null = null;
+  private currentGroundCellSize = MIN_GRID_COVERAGE / GRID_BASE_SIZE;
   
   // 用于射线检测的对象
   private readonly raycaster = new Raycaster();
@@ -182,7 +285,8 @@ export class SceneController {
     this.canvas = canvas;
 
     this.scene = new Scene();
-    this.scene.background = new Color('#07121a');
+    this.scene.background = new Color(DEFAULT_SKY_COLOR);
+    this.scene.fog = new Fog(DEFAULT_HAZE_COLOR, DEFAULT_FOG_NEAR, DEFAULT_FOG_FAR);
 
     this.camera = new PerspectiveCamera(75, 1, 0.05, 500);
     this.camera.position.set(2, 2, 2);
@@ -229,7 +333,7 @@ export class SceneController {
       this.pmremGenerator = new PMREMGenerator(this.renderer);
       this.pmremGenerator.compileEquirectangularShader();
       const envScene = new Scene();
-      envScene.add(new HemisphereLight('#ffffff', '#45505f', 1.0));
+      envScene.add(new HemisphereLight('#ffffff', '#9cb2c4', 1.0));
       const envKeyLight = new DirectionalLight('#ffffff', 0.8);
       envKeyLight.position.set(3, 5, 2);
       envScene.add(envKeyLight);
@@ -244,7 +348,7 @@ export class SceneController {
       this.scene.environment = null;
     }
 
-    this.hemisphereLight = new HemisphereLight('#ffffff', '#21313d', 0.55);
+    this.hemisphereLight = new HemisphereLight('#f8fbff', '#9db1c3', 0.82);
     this.hemisphereLight.position.set(0, 1, 0);
     this.scene.add(this.hemisphereLight);
 
@@ -271,11 +375,19 @@ export class SceneController {
     this.modelRoot.name = 'model-root';
     this.scene.add(this.modelRoot);
 
+    this.groundTexture = createMujocoGroundTexture();
+    this.groundTexture.anisotropy = Math.min(
+      8,
+      this.renderer.capabilities.getMaxAnisotropy(),
+    );
+
     this.groundPlane = new Mesh(
-      new PlaneGeometry(GRID_BASE_SIZE, GRID_BASE_SIZE),
-      new ShadowMaterial({
-        transparent: true,
-        opacity: 0.24,
+      new PlaneGeometry(GROUND_DISPLAY_BASE_SIZE, GROUND_DISPLAY_BASE_SIZE),
+      new MeshPhongMaterial({
+        color: '#ffffff',
+        map: this.groundTexture,
+        shininess: 6,
+        specular: new Color('#d5e8f7'),
       }),
     );
     this.groundPlane.rotation.x = -HALF_PI;
@@ -285,18 +397,112 @@ export class SceneController {
     this.groundPlane.visible = true;
     this.scene.add(this.groundPlane);
 
-    this.referenceGrid = new GridHelper(GRID_BASE_SIZE, 20, '#4b7a95', '#26485c');
+    this.referenceGrid = new GridHelper(
+      GROUND_DISPLAY_BASE_SIZE,
+      GROUND_GRID_DIVISIONS,
+      '#f7fbff',
+      '#b2c4d3',
+    );
     this.referenceGrid.position.y = 0;
     const gridMaterials = Array.isArray(this.referenceGrid.material)
       ? this.referenceGrid.material
       : [this.referenceGrid.material];
     for (const material of gridMaterials) {
-      material.opacity = 0.92;
+      material.opacity = 0.14;
       material.transparent = true;
       material.depthWrite = false;
     }
     this.referenceGrid.renderOrder = 1;
     this.scene.add(this.referenceGrid);
+
+    this.majorGrid = new GridHelper(
+      GROUND_DISPLAY_BASE_SIZE,
+      GROUND_MAJOR_GRID_DIVISIONS,
+      '#2f7198',
+      '#6f91aa',
+    );
+    this.majorGrid.position.y = 0;
+    const majorGridMaterials = Array.isArray(this.majorGrid.material)
+      ? this.majorGrid.material
+      : [this.majorGrid.material];
+    for (const material of majorGridMaterials) {
+      material.opacity = 0.32;
+      material.transparent = true;
+      material.depthWrite = false;
+    }
+    this.majorGrid.renderOrder = 2;
+    this.scene.add(this.majorGrid);
+
+    this.stabilityOverlayGroup = new Group();
+    this.stabilityOverlayGroup.name = 'stability-overlay';
+    this.stabilityOverlayGroup.visible = false;
+
+    this.stabilityComMaterial = new MeshBasicMaterial({
+      color: '#53bf9d',
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.stabilityProjectionMaterial = new MeshBasicMaterial({
+      color: '#53bf9d',
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.stabilityProjectionLineMaterial = new LineBasicMaterial({
+      color: '#53bf9d',
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.stabilitySupportFillMaterial = new MeshBasicMaterial({
+      color: '#53bf9d',
+      transparent: true,
+      opacity: 0.22,
+      side: DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.stabilitySupportOutlineMaterial = new LineBasicMaterial({
+      color: '#53bf9d',
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false,
+    });
+
+    this.stabilityComMarker = new Mesh(
+      new SphereGeometry(0.024, 16, 10),
+      this.stabilityComMaterial,
+    );
+    this.stabilityProjectionMarker = new Mesh(
+      new SphereGeometry(0.016, 12, 8),
+      this.stabilityProjectionMaterial,
+    );
+    this.stabilityProjectionLine = new Line(
+      new BufferGeometry(),
+      this.stabilityProjectionLineMaterial,
+    );
+    this.stabilitySupportFill = new Mesh(
+      new BufferGeometry(),
+      this.stabilitySupportFillMaterial,
+    );
+    this.stabilitySupportOutline = new Line(
+      new BufferGeometry(),
+      this.stabilitySupportOutlineMaterial,
+    );
+    this.stabilitySupportFill.renderOrder = 6;
+    this.stabilitySupportOutline.renderOrder = 7;
+    this.stabilityProjectionLine.renderOrder = 8;
+    this.stabilityProjectionMarker.renderOrder = 9;
+    this.stabilityComMarker.renderOrder = 10;
+    this.stabilityOverlayGroup.add(
+      this.stabilitySupportFill,
+      this.stabilitySupportOutline,
+      this.stabilityProjectionLine,
+      this.stabilityProjectionMarker,
+      this.stabilityComMarker,
+    );
+    this.scene.add(this.stabilityOverlayGroup);
 
     this.setModelUpAxis('+Z');
     this.setVisualProfile('default');
@@ -321,57 +527,72 @@ export class SceneController {
   setVisualProfile(profile: SceneVisualProfile): void {
     this.currentVisualProfile = profile;
     const groundMaterial = this.groundPlane.material as any;
+    const fog = this.scene.fog as any;
 
     if (profile === 'smpl') {
-      this.scene.background = new Color('#07121a');
+      this.scene.background = new Color('#dbe6ee');
       this.scene.environment = this.environmentMapTarget?.texture ?? null;
       this.renderer.toneMappingExposure = 1.0;
+      fog?.color.set('#c4d5e2');
+      if (fog) {
+        fog.near = DEFAULT_FOG_NEAR;
+        fog.far = DEFAULT_FOG_FAR;
+      }
 
-      this.hemisphereLight.color.set('#ffffff');
-      this.hemisphereLight.groundColor.set('#d4d4d4');
-      this.hemisphereLight.intensity = 0.82;
+      this.hemisphereLight.color.set('#f9fcff');
+      this.hemisphereLight.groundColor.set('#afc1cf');
+      this.hemisphereLight.intensity = 1.0;
 
       this.keyLight.color.set('#fffdf8');
-      this.keyLight.intensity = 1.38;
+      this.keyLight.intensity = 1.48;
       this.keyLightOffset.copy(SMPL_KEY_LIGHT_OFFSET);
 
-      this.fillLight.color.set('#ffffff');
-      this.fillLight.intensity = 1.08;
+      this.fillLight.color.set('#edf6ff');
+      this.fillLight.intensity = 0.98;
 
-      this.rimLight.color.set('#fff6ef');
-      this.rimLight.intensity = 0.82;
+      this.rimLight.color.set('#d6e9f8');
+      this.rimLight.intensity = 0.42;
 
       this.referenceGrid.visible = true;
+      this.majorGrid.visible = true;
       if (groundMaterial) {
-        groundMaterial.opacity = 0.24;
-        groundMaterial.color?.set?.('#000000');
+        groundMaterial.opacity = 1;
+        groundMaterial.color?.set?.('#ffffff');
+        groundMaterial.transparent = false;
         groundMaterial.needsUpdate = true;
       }
     } else {
-      this.scene.background = new Color('#07121a');
+      this.scene.background = new Color(DEFAULT_SKY_COLOR);
       this.scene.environment = this.environmentMapTarget?.texture ?? null;
       this.renderer.toneMappingExposure = 1.0;
+      fog?.color.set(DEFAULT_HAZE_COLOR);
+      if (fog) {
+        fog.near = DEFAULT_FOG_NEAR;
+        fog.far = DEFAULT_FOG_FAR;
+      }
 
-      this.hemisphereLight.color.set('#ffffff');
-      this.hemisphereLight.groundColor.set('#21313d');
-      this.hemisphereLight.intensity = 0.55;
+      this.hemisphereLight.color.set('#f8fbff');
+      this.hemisphereLight.groundColor.set('#9db1c3');
+      this.hemisphereLight.intensity = 0.88;
 
-      this.keyLight.color.set('#ffffff');
-      this.keyLight.intensity = Math.PI;
+      this.keyLight.color.set('#fffdf8');
+      this.keyLight.intensity = 1.68;
       this.keyLightOffset.copy(DEFAULT_KEY_LIGHT_OFFSET);
 
-      this.fillLight.color.set('#d2e8ff');
-      this.fillLight.intensity = Math.PI * 0.34;
+      this.fillLight.color.set('#e7f3ff');
+      this.fillLight.intensity = 0.84;
       this.fillLight.position.copy(DEFAULT_FILL_LIGHT_POSITION);
 
-      this.rimLight.color.set('#9ec9ff');
-      this.rimLight.intensity = Math.PI * 0.14;
+      this.rimLight.color.set('#bdd9ef');
+      this.rimLight.intensity = 0.28;
       this.rimLight.position.copy(DEFAULT_RIM_LIGHT_POSITION);
 
       this.referenceGrid.visible = true;
+      this.majorGrid.visible = true;
       if (groundMaterial) {
-        groundMaterial.opacity = 0.24;
-        groundMaterial.color?.set?.('#000000');
+        groundMaterial.opacity = 1;
+        groundMaterial.color?.set?.('#ffffff');
+        groundMaterial.transparent = false;
         groundMaterial.needsUpdate = true;
       }
     }
@@ -381,7 +602,7 @@ export class SceneController {
       if (box) {
         const center = box.getCenter(new Vector3());
         this.updateKeyLightForBounds(box, center);
-        this.updateGroundAndGrid(box);
+        this.updateGroundAndGrid(box, { preserveGroundHeight: true });
       }
     } else {
       this.keyLight.position.copy(this.keyLightOffset);
@@ -394,10 +615,50 @@ export class SceneController {
     return this.viewMode;
   }
 
+  getCurrentGroundY(): number {
+    return this.currentGroundY;
+  }
+
+  setStabilityOverlay(frame: StabilityOverlayFrame | null): void {
+    if (!frame || !frame.visible) {
+      this.stabilityOverlayGroup.visible = false;
+      return;
+    }
+
+    const color = frame.stable ? '#53bf9d' : '#ff5c6c';
+    this.stabilityComMaterial.color.set(color);
+    this.stabilityProjectionMaterial.color.set(color);
+    this.stabilityProjectionLineMaterial.color.set(color);
+    this.stabilitySupportFillMaterial.color.set(color);
+    this.stabilitySupportOutlineMaterial.color.set(color);
+    this.stabilityOverlayGroup.visible = true;
+
+    const hasCom = Boolean(frame.centerOfMass && frame.centerOfMassProjection);
+    this.stabilityComMarker.visible = hasCom;
+    this.stabilityProjectionMarker.visible = hasCom;
+    this.stabilityProjectionLine.visible = hasCom;
+    if (hasCom && frame.centerOfMass && frame.centerOfMassProjection) {
+      this.stabilityComMarker.position.copy(frame.centerOfMass);
+      this.stabilityProjectionMarker.position.copy(frame.centerOfMassProjection);
+      this.stabilityProjectionLine.geometry.dispose();
+      this.stabilityProjectionLine.geometry = new BufferGeometry().setFromPoints([
+        frame.centerOfMass,
+        frame.centerOfMassProjection,
+      ]);
+    }
+
+    this.updateStabilityPolygonGeometry(frame.supportPolygon);
+  }
+
+  clearStabilityOverlay(): void {
+    this.stabilityOverlayGroup.visible = false;
+  }
+
   setRobot(robot: UrdfRobotLike): void {
     this.clearRobot();
     this.currentRobot = robot;
     this.modelRoot.add(robot);
+    this.applyRobotGrounding(robot);
 
     this.applyMeshDefaults(robot);
     this.collectGeometryNodes(robot);
@@ -425,12 +686,15 @@ export class SceneController {
     if (this.currentRobot) {
       const box = this.computeRobotBounds(this.currentRobot);
       if (box) {
-        this.updateGroundAndGrid(box);
+        this.updateGroundAndGrid(box, { preserveGroundHeight: true });
       }
     }
   }
 
   clearRobot(): void {
+    this.anchoredGroundY = null;
+    this.currentGroundY = 0;
+    this.clearStabilityOverlay();
     if (!this.currentRobot) {
       return;
     }
@@ -441,9 +705,11 @@ export class SceneController {
     this.visualNodes = [];
     this.collisionNodes = [];
     this.referenceGrid.scale.setScalar(1);
-    this.referenceGrid.position.y = 0;
+    this.referenceGrid.position.set(0, 0, 0);
+    this.majorGrid.scale.setScalar(1);
+    this.majorGrid.position.set(0, 0, 0);
     this.groundPlane.scale.setScalar(1);
-    this.groundPlane.position.y = 0;
+    this.groundPlane.position.set(0, 0, 0);
     this.emitWarning(null);
   }
 
@@ -480,7 +746,13 @@ export class SceneController {
     return box;
   }
 
-  updateGroundAndGrid(box: any): void {
+  updateGroundAndGrid(
+    box: any,
+    options: {
+      preserveGroundHeight?: boolean;
+      forcedGroundHeight?: number;
+    } = {},
+  ): void {
     if (box.isEmpty()) {
       return;
     }
@@ -488,11 +760,38 @@ export class SceneController {
     const size = box.getSize(new Vector3());
     const maxDimension = Math.max(size.x, size.y, size.z, 0.01);
     const gridScale = computeGridScale(maxDimension);
-    this.referenceGrid.scale.setScalar(gridScale);
-    this.referenceGrid.position.y = box.min.y + 0.0005;
+    const computedGroundY = this.getGroundPlaneY(box);
+    const groundingOffset = this.currentRobot ? getRobotGroundingOffset(this.currentRobot) : 0;
+    const forcedGroundHeight =
+      typeof options.forcedGroundHeight === 'number' &&
+      Number.isFinite(options.forcedGroundHeight)
+        ? options.forcedGroundHeight
+        : null;
+    if (forcedGroundHeight !== null) {
+      this.anchoredGroundY = forcedGroundHeight;
+    } else if (!options.preserveGroundHeight || this.anchoredGroundY === null) {
+      this.anchoredGroundY = computedGroundY;
+    }
 
+    const groundY =
+      forcedGroundHeight ??
+      resolveGroundPlaneY(
+        box.min.y,
+        groundingOffset,
+        options.preserveGroundHeight ? this.anchoredGroundY : null,
+      );
+    const fog = this.scene.fog as any;
+    this.currentGroundCellSize = gridScale;
+    this.currentGroundY = groundY;
     this.groundPlane.scale.setScalar(gridScale);
-    this.groundPlane.position.y = box.min.y + 0.0001;
+    this.referenceGrid.scale.setScalar(gridScale);
+    this.majorGrid.scale.setScalar(gridScale);
+    this.updateInfiniteGroundPlacement();
+    if (fog) {
+      const coverage = GROUND_DISPLAY_BASE_SIZE * gridScale;
+      fog.near = Math.max(coverage * 0.38, DEFAULT_FOG_NEAR);
+      fog.far = Math.max(coverage * 1.2, DEFAULT_FOG_FAR);
+    }
   }
 
   syncGroundToCurrentRobot(): void {
@@ -505,7 +804,33 @@ export class SceneController {
       return;
     }
 
-    this.updateGroundAndGrid(box);
+    // Preserve the anchored ground plane so root translation changes move the robot,
+    // not the floor.
+    this.updateGroundAndGrid(box, { preserveGroundHeight: true });
+  }
+
+  anchorGroundToOrigin(): void {
+    if (!this.currentRobot) {
+      this.anchoredGroundY = 0;
+      this.currentGroundY = 0;
+      this.updateInfiniteGroundPlacement();
+      return;
+    }
+
+    const box = this.computeRobotBounds(this.currentRobot);
+    if (!box) {
+      this.anchoredGroundY = 0;
+      this.currentGroundY = 0;
+      this.updateInfiniteGroundPlacement();
+      return;
+    }
+
+    // Motion playback should use a stable world-origin floor so root Z remains
+    // the single source of truth for vertical motion.
+    this.updateGroundAndGrid(box, {
+      preserveGroundHeight: true,
+      forcedGroundHeight: 0,
+    });
   }
 
   syncViewToCurrentRobot(): void {
@@ -564,6 +889,18 @@ export class SceneController {
 
     this.groundPlane.geometry?.dispose?.();
     disposeMaterial(this.groundPlane.material);
+    this.groundTexture.dispose();
+
+    this.stabilityComMarker.geometry?.dispose?.();
+    this.stabilityProjectionMarker.geometry?.dispose?.();
+    this.stabilityProjectionLine.geometry?.dispose?.();
+    this.stabilitySupportFill.geometry?.dispose?.();
+    this.stabilitySupportOutline.geometry?.dispose?.();
+    disposeMaterial(this.stabilityComMaterial);
+    disposeMaterial(this.stabilityProjectionMaterial);
+    disposeMaterial(this.stabilityProjectionLineMaterial);
+    disposeMaterial(this.stabilitySupportFillMaterial);
+    disposeMaterial(this.stabilitySupportOutlineMaterial);
 
     this.environmentMapTarget?.dispose?.();
     this.pmremGenerator?.dispose?.();
@@ -635,11 +972,30 @@ export class SceneController {
     this.collisionNodes = collisionNodes.size > 0 ? [...collisionNodes] : [...collisionMeshes];
   }
 
+  private applyRobotGrounding(robot: UrdfRobotLike): void {
+    const robotObject = robot as any;
+    robotObject.position.y = getRobotGroundingOffset(robot);
+    robotObject.updateMatrixWorld?.(true);
+  }
+
   private animate(): void {
     this.animationFrameId = requestAnimationFrame(this.animate);
     this.controls.update();
     this.resize();
+    this.updateInfiniteGroundPlacement();
     this.renderer.render(this.scene, this.camera);
+  }
+
+  private updateInfiniteGroundPlacement(): void {
+    const cellSize = Math.max(this.currentGroundCellSize, 0.001);
+    const snapStep = Math.max(cellSize * GROUND_MAJOR_LINE_INTERVAL, cellSize);
+    const anchor = this.controls?.target ?? this.tempGroundAnchor.set(0, 0, 0);
+    const snappedX = Math.round(anchor.x / snapStep) * snapStep;
+    const snappedZ = Math.round(anchor.z / snapStep) * snapStep;
+
+    this.groundPlane.position.set(snappedX, this.currentGroundY + 0.0001, snappedZ);
+    this.referenceGrid.position.set(snappedX, this.currentGroundY + 0.0005, snappedZ);
+    this.majorGrid.position.set(snappedX, this.currentGroundY + 0.0008, snappedZ);
   }
 
   // 处理鼠标点击事件
@@ -851,6 +1207,36 @@ export class SceneController {
     return [robot];
   }
 
+  private updateStabilityPolygonGeometry(points: readonly ThreeVector3[]): void {
+    const hasOutline = points.length >= 2;
+    this.stabilitySupportOutline.visible = hasOutline;
+    if (hasOutline) {
+      const outlinePoints = [...points, points[0]];
+      this.stabilitySupportOutline.geometry.dispose();
+      this.stabilitySupportOutline.geometry = new BufferGeometry().setFromPoints(outlinePoints);
+    }
+
+    const hasFill = points.length >= 3;
+    this.stabilitySupportFill.visible = hasFill;
+    if (!hasFill) {
+      return;
+    }
+
+    const vertices: number[] = [];
+    for (let index = 1; index < points.length - 1; index += 1) {
+      const a = points[0];
+      const b = points[index];
+      const c = points[index + 1];
+      vertices.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+    }
+
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new Float32BufferAttribute(vertices, 3));
+    geometry.computeBoundingSphere();
+    this.stabilitySupportFill.geometry.dispose();
+    this.stabilitySupportFill.geometry = geometry;
+  }
+
   private computeRobotBounds(robot: UrdfRobotLike): any | null {
     this.modelRoot.updateMatrixWorld(true);
 
@@ -922,6 +1308,14 @@ export class SceneController {
     }
 
     shadowCamera.updateProjectionMatrix();
+  }
+
+  private getGroundPlaneY(box: any): number {
+    if (!this.currentRobot) {
+      return box.min.y;
+    }
+
+    return computeGroundPlaneY(box.min.y, getRobotGroundingOffset(this.currentRobot));
   }
 
   private emitWarning(warning: string | null): void {

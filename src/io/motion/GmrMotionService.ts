@@ -1,11 +1,14 @@
 import type { DroppedFileMap, MotionClip, MotionSchema } from '../../types/viewer';
-import { DEFAULT_MOTION_FPS, DEFAULT_ROOT_COMPONENT_COUNT } from './MotionSchema';
+import {
+  DEFAULT_MOTION_FPS,
+  DEFAULT_ROOT_COMPONENT_COUNT,
+} from './MotionSchema';
 import { getBaseName, normalizePath } from '../urdf/pathResolver';
 import {
   parsePickleNdarrayFloat64,
   parsePythonPickleBuffer,
 } from './PythonPickleIO';
-import { pickle } from 'picklefriend';
+import { dumpGmrMotionPythonPickle } from './PythonPickleWriter';
 
 interface ParsedGmrMotionPayload {
   name: string;
@@ -18,6 +21,7 @@ interface ParsedGmrMotionPayload {
   dofPos: Float64Array;
   linkBodyList: string[];
   warnings: string[];
+  usedActiveUrdfJointOrderFallback: boolean;
 }
 
 export interface GmrMotionLoadResult {
@@ -128,6 +132,12 @@ function parseStringArray(value: unknown, label: string): string[] {
   return value.map((item) => String(item ?? ''));
 }
 
+function applyMissingLinkBodyListFallback(
+  payload: ParsedGmrMotionPayload,
+): ParsedGmrMotionPayload {
+  return payload;
+}
+
 async function parseGmrMotionPayload(
   file: File,
   sourcePath: string,
@@ -189,10 +199,11 @@ async function parseGmrMotionPayload(
   }
 
   let linkBodyList: string[] = [];
+  let usedActiveUrdfJointOrderFallback = false;
   if (parsed.link_body_list !== null && parsed.link_body_list !== undefined) {
     linkBodyList = parseStringArray(parsed.link_body_list, 'link_body_list');
   } else {
-    warnings.push('GMR PKL has null or undefined link_body_list, using empty array.');
+    usedActiveUrdfJointOrderFallback = true;
   }
 
   const frameCount = rootPos.shape[0];
@@ -225,6 +236,7 @@ async function parseGmrMotionPayload(
     dofPos: dofPos.values,
     linkBodyList,
     warnings,
+    usedActiveUrdfJointOrderFallback,
   };
 }
 
@@ -344,7 +356,9 @@ export class GmrMotionService {
         throw new Error(`Requested GMR motion not found in dropped files: ${preferredMotionPath}`);
       }
 
-      const payload = await loadPath(selectedPath);
+      const payload = applyMissingLinkBodyListFallback(
+        await loadPath(selectedPath),
+      );
       const clip = buildMotionClip(payload, motionSchema);
       for (const warning of payload.warnings) {
         warnings.add(warning);
@@ -397,6 +411,8 @@ export class GmrMotionService {
       );
     }
 
+    selectedPayload = applyMissingLinkBodyListFallback(selectedPayload);
+
     for (const warning of selectedPayload.warnings) {
       warnings.add(warning);
     }
@@ -420,55 +436,53 @@ export class GmrMotionService {
     };
   }
 
-  toGmrPkl(clip: MotionClip): string {
+  toGmrPkl(clip: MotionClip): Uint8Array {
     const { data, frameCount, fps, schema } = clip;
     const jointCount = schema.jointNames.length;
     const stride = DEFAULT_ROOT_COMPONENT_COUNT + jointCount;
 
-    // Extract root positions (x, y, z) for each frame
-    const rootPos: number[][] = [];
-    // Extract root rotations (x, y, z, w) for each frame
-    const rootRot: number[][] = [];
-    // Extract joint positions for each frame
-    const dofPos: number[][] = [];
+    const rootPos = new Float64Array(frameCount * 3);
+    const rootRot = new Float64Array(frameCount * 4);
+    const dofPos = new Float64Array(frameCount * jointCount);
 
     for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
       const baseIndex = frameIndex * stride;
-      
-      // Root position (x, y, z)
-      rootPos.push([
-        data[baseIndex],
-        data[baseIndex + 1],
-        data[baseIndex + 2]
-      ]);
+      const rootPosBase = frameIndex * 3;
+      rootPos[rootPosBase] = data[baseIndex] ?? 0;
+      rootPos[rootPosBase + 1] = data[baseIndex + 1] ?? 0;
+      rootPos[rootPosBase + 2] = data[baseIndex + 2] ?? 0;
 
-      // Root rotation (x, y, z, w)
-      rootRot.push([
-        data[baseIndex + 3],
-        data[baseIndex + 4],
-        data[baseIndex + 5],
-        data[baseIndex + 6]
-      ]);
+      const rootRotBase = frameIndex * 4;
+      rootRot[rootRotBase] = data[baseIndex + 3] ?? 0;
+      rootRot[rootRotBase + 1] = data[baseIndex + 4] ?? 0;
+      rootRot[rootRotBase + 2] = data[baseIndex + 5] ?? 0;
+      rootRot[rootRotBase + 3] = data[baseIndex + 6] ?? 1;
 
-      // Joint positions
-      const jointPositions: number[] = [];
+      const dofBase = frameIndex * jointCount;
       for (let jointIndex = 0; jointIndex < jointCount; jointIndex += 1) {
-        jointPositions.push(data[baseIndex + DEFAULT_ROOT_COMPONENT_COUNT + jointIndex]);
+        dofPos[dofBase + jointIndex] =
+          data[baseIndex + DEFAULT_ROOT_COMPONENT_COUNT + jointIndex] ?? 0;
       }
-      dofPos.push(jointPositions);
     }
 
-    // Create the GMR pickle structure exactly as requested
-    const gmrData = {
+    return dumpGmrMotionPythonPickle({
       fps,
-      root_pos: rootPos,
-      root_rot: rootRot,
-      dof_pos: dofPos,
-      local_body_pos: null,
-      link_body_list: schema.jointNames
-    };
-
-    // Serialize to pickle format
-    return pickle.dumps(gmrData);
+      rootPos: {
+        rows: frameCount,
+        cols: 3,
+        values: rootPos,
+      },
+      rootRot: {
+        rows: frameCount,
+        cols: 4,
+        values: rootRot,
+      },
+      dofPos: {
+        rows: frameCount,
+        cols: jointCount,
+        values: dofPos,
+      },
+      linkBodyList: [...schema.jointNames],
+    });
   }
 }

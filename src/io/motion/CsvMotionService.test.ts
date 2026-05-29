@@ -110,5 +110,21 @@ describe('CsvMotionService', () => {
     expect(result.selectedCsvPath).toBe('a.csv');
     expect(result.warnings.some((warning) => warning.includes('Multiple CSV files'))).toBe(true);
   });
-});
 
+  it('exports the clip data verbatim without adding an extra robot height offset', () => {
+    const service = new CsvMotionService();
+    const clip = {
+      name: 'edited.csv',
+      sourcePath: 'edited.csv',
+      fps: DEFAULT_MOTION_FPS,
+      frameCount: 1,
+      stride: 10,
+      schema: TEST_MOTION_SCHEMA,
+      csvMode: 'ordered' as const,
+      sourceColumnCount: 10,
+      data: new Float32Array([0.1, -0.2, 1.75, 0, 0, 0, 1, 0.4, -0.5, 0.6]),
+    };
+
+    expect(service.toCsv(clip)).toBe('0.10000000149011612,-0.20000000298023224,1.75,0,0,0,1,0.4000000059604645,-0.5,0.6000000238418579');
+  });
+});
