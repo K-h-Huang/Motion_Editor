@@ -861,6 +861,8 @@ export class AppController {
   private readonly presetLoadButton: HTMLButtonElement;
   private readonly objSelect: HTMLSelectElement;
   private readonly exportMotionButton: HTMLButtonElement;
+  private readonly prevFrameButton: HTMLButtonElement;
+  private readonly nextFrameButton: HTMLButtonElement;
   private readonly insertKeyframeButton: HTMLButtonElement;
   private readonly prevKeyframeButton: HTMLButtonElement;
   private readonly nextKeyframeButton: HTMLButtonElement;
@@ -1201,6 +1203,14 @@ export class AppController {
     this.seekActiveMotion(frameIndex);
   };
 
+  private readonly onPrevFrameClick = (): void => {
+    this.stepActiveMotionFrame(-1);
+  };
+
+  private readonly onNextFrameClick = (): void => {
+    this.stepActiveMotionFrame(1);
+  };
+
   private readonly onMotionFpsInput = (): void => {
     const rawFps = Number(this.motionFpsInput.value);
     if (!Number.isFinite(rawFps) || rawFps <= 0) {
@@ -1260,6 +1270,8 @@ export class AppController {
     this.presetLoadButton = requireElement<HTMLButtonElement>('preset-load-btn');
     this.objSelect = requireElement<HTMLSelectElement>('obj-select');
     this.exportMotionButton = requireElement<HTMLButtonElement>('export-motion-btn');
+    this.prevFrameButton = requireElement<HTMLButtonElement>('prev-frame-btn');
+    this.nextFrameButton = requireElement<HTMLButtonElement>('next-frame-btn');
     this.insertKeyframeButton = requireElement<HTMLButtonElement>('insert-keyframe-btn');
     this.prevKeyframeButton = requireElement<HTMLButtonElement>('prev-keyframe-btn');
     this.nextKeyframeButton = requireElement<HTMLButtonElement>('next-keyframe-btn');
@@ -1396,6 +1408,8 @@ export class AppController {
     this.motionFpsInput.addEventListener('change', this.onMotionFpsChange);
     this.motionFrameSlider.addEventListener('input', this.onMotionFrameInput);
     this.exportMotionButton.addEventListener('click', this.onExportMotionClick);
+    this.prevFrameButton.addEventListener('click', this.onPrevFrameClick);
+    this.nextFrameButton.addEventListener('click', this.onNextFrameClick);
     this.insertKeyframeButton.addEventListener('click', this.onInsertKeyframeClick);
     this.prevKeyframeButton.addEventListener('click', this.onPrevKeyframeClick);
     this.nextKeyframeButton.addEventListener('click', this.onNextKeyframeClick);
@@ -3065,6 +3079,33 @@ export class AppController {
     }
   }
 
+  private stepActiveMotionFrame(delta: -1 | 1): void {
+    if (!this.hasAnyMotion()) {
+      return;
+    }
+
+    const sliderFrame = Number(this.motionFrameSlider.value);
+    const currentFrame = this.motionFrameSnapshot?.frameIndex ?? sliderFrame;
+    const frameCount =
+      this.motionFrameSnapshot?.frameCount ?? Number(this.motionFrameSlider.max) + 1;
+
+    if (!Number.isFinite(currentFrame) || !Number.isFinite(frameCount) || frameCount <= 0) {
+      return;
+    }
+
+    const lastFrame = Math.max(Math.floor(frameCount) - 1, 0);
+    const targetFrame = Math.min(lastFrame, Math.max(0, Math.floor(currentFrame) + delta));
+
+    if (targetFrame === currentFrame) {
+      return;
+    }
+
+    if (this.isMotionPlaying) {
+      this.pauseActiveMotion();
+    }
+    this.seekActiveMotion(targetFrame);
+  }
+
   private handleDragStateChange(isDragging: boolean): void {
     if (this.viewerState === 'loading') {
       return;
@@ -3846,6 +3887,8 @@ export class AppController {
     this.motionControlsSection.hidden = !hasMotion;
     this.motionPlayButton.disabled = !hasMotion;
     this.motionResetButton.disabled = !hasMotion;
+    this.prevFrameButton.disabled = !hasMotion;
+    this.nextFrameButton.disabled = !hasMotion;
     this.insertKeyframeButton.disabled = !hasMotion;
     this.motionFrameCountInput.disabled = !hasMotion;
 
@@ -3887,6 +3930,8 @@ export class AppController {
       } as MotionFrameSnapshot);
 
     const maxFrame = Math.max(snapshot.frameCount - 1, 0);
+    this.prevFrameButton.disabled = snapshot.frameIndex <= 0;
+    this.nextFrameButton.disabled = snapshot.frameIndex >= maxFrame;
     this.motionFrameSlider.min = '0';
     this.motionFrameSlider.max = String(maxFrame);
     this.motionFrameSlider.step = '1';
