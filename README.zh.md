@@ -11,7 +11,7 @@
 - 2026-5-30:
 1.感谢 [@Amafide](https://github.com/Amafide) 为项目贡献了新的曲线编辑器功能！
 2.感谢 [@zhaozigu](https://github.com/zhaozigu) 为项目贡献了帧导航（前后帧按钮）功能！
-3.曲线编辑器在 [`feature/curve-editor`](https://github.com/K-h-Huang/Motion_Editor/blob/feature/curve-editor/README.zh.md) 分支中可用。
+3.曲线编辑器在 [`feature/curve-editor`](https://github.com/K-h-Huang/Motion_Editor/tree/feature/curve-editor) 分支中可用。
 4.GitHub Pages 尚未更新，推荐本地部署以使用此功能。
 
 - 2026-3-29:
