@@ -8,9 +8,9 @@ Its core purpose is to quickly load robot models in the browser, create and edit
 
 ## Update Log
 - 2026-5-30:
-1.Thanks to @Amafide for contributing the new curve editor feature!
-2.Thanks to @zhaozigu for contributing frame navigation (prev/next frame buttons) feature!
-3.Curve editor is available in the `feature/curve-editor` branch.
+1.Thanks to [@Amafide](https://github.com/Amafide) for contributing the new curve editor feature!
+2.Thanks to [@zhaozigu](https://github.com/zhaozigu) for contributing frame navigation (prev/next frame buttons) feature!
+3.Curve editor is available in the [`feature/curve-editor`](https://github.com/K-h-Huang/Motion_Editor/blob/feature/curve-editor/README.md) branch.
 4.GitHub Pages not yet updated, recommend local deployment to use this feature.
 
 - 2026-3-29:
