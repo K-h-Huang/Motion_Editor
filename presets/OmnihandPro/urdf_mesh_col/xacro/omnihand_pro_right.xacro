@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="omnihand_pro_right">
+
+<xacro:include filename="$(find omnihand_pro_description)/urdf_mesh_col/xacro/hand.xacro" />
+
+<link name="base_link">
+    <visual>
+        <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+        <geometry>
+            <box size="0.001 0.001 0.001" />
+        </geometry>
+    </visual>
+</link>
+
+<xacro:hand name="R" mirror="1" mirror_mesh="False" >
+    <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+</xacro:hand>
+
+</robot>
