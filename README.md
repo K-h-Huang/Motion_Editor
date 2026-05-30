@@ -8,9 +8,10 @@ Its core purpose is to quickly load robot models in the browser, create and edit
 
 ## Update Log
 - 2026-5-30:
-1.Thanks to @zhaozigu for contributing the new curve editor feature!
-2.Curve editor is available in the `feature/curve-editor` branch.
-3.GitHub Pages not yet updated, recommend local deployment to use this feature.
+1.Thanks to @Amafide for contributing the new curve editor feature!
+2.Thanks to @zhaozigu for contributing frame navigation (prev/next frame buttons) feature!
+3.Curve editor is available in the `feature/curve-editor` branch.
+4.GitHub Pages not yet updated, recommend local deployment to use this feature.
 
 - 2026-3-29:
 1.Add option to choose insertion position (before or after existing data) when adjusting motion duration.
